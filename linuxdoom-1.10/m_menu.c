@@ -1611,7 +1611,6 @@ boolean M_Responder (event_t* ev)
 	if (ch == KEY_ESCAPE)
 	{
 	    M_StartControlPanel ();
-	    S_StartSound(NULL,sfx_swtchn);
 	    return true;
 	}
 	return false;
@@ -1737,6 +1736,7 @@ void M_StartControlPanel (void)
     menuactive = 1;
     currentMenu = &MainDef;         // JDC
     itemOn = currentMenu->lastOn;   // JDC
+    S_StartSound(NULL, sfx_swtchn);
 }
 
 
