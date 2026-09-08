@@ -600,10 +600,13 @@ PIT_AddLineIntercepts (line_t* ld)
     }
     
 	
-    intercept_p->frac = frac;
-    intercept_p->isaline = true;
-    intercept_p->d.line = ld;
-    intercept_p++;
+    if (intercept_p < &intercepts[MAXINTERCEPTS-1])
+    {
+	intercept_p->frac = frac;
+	intercept_p->isaline = true;
+	intercept_p->d.line = ld;
+	intercept_p++;
+    }
 
     return true;	// continue
 }
@@ -665,10 +668,13 @@ boolean PIT_AddThingIntercepts (mobj_t* thing)
     if (frac < 0)
 	return true;		// behind source
 
-    intercept_p->frac = frac;
-    intercept_p->isaline = false;
-    intercept_p->d.thing = thing;
-    intercept_p++;
+    if (intercept_p < &intercepts[MAXINTERCEPTS-1])
+    {
+	intercept_p->frac = frac;
+	intercept_p->isaline = false;
+	intercept_p->d.thing = thing;
+	intercept_p++;
+    }
 
     return true;		// keep going
 }
