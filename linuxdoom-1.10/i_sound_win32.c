@@ -293,29 +293,58 @@ int I_RegisterSong(void *data)
     return current_music_handle;
 }
 
+static HANDLE music_thread = NULL;
+static char pending_mid_path[MAX_PATH] = {0};
+
+static DWORD WINAPI music_worker(LPVOID param)
+{
+    char path[MAX_PATH];
+    strncpy(path, pending_mid_path, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
+    mciSendStringA("stop doom_bgm", NULL, 0, NULL);
+    mciSendStringA("close doom_bgm", NULL, 0, NULL);
+
+    if (snd_MusicVolume > 0 && path[0] != '\0') {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "open \"%s\" type sequencer alias doom_bgm", path);
+        MCIERROR oerr = mciSendStringA(cmd, NULL, 0, NULL);
+        MCIERROR perr = (oerr == 0) ? mciSendStringA("play doom_bgm from 0", NULL, 0, NULL) : 9999;
+        if (oerr == 0 && perr == 0) {
+            music_paused = false;
+        }
+    }
+    return 0;
+}
+
 void I_PlaySong(int h, int looping)
 {
     if (!h || current_mid_path[0] == '\0') return;
-    mciSendStringA("stop doom_bgm", NULL, 0, NULL);
-    mciSendStringA("close doom_bgm", NULL, 0, NULL);
     music_playing = true;
     music_looping = (looping != 0);
     if (snd_MusicVolume == 0) {
         music_paused = true;
         return;
     }
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "open \"%s\" type sequencer alias doom_bgm", current_mid_path);
-    MCIERROR oerr = mciSendStringA(cmd, NULL, 0, NULL);
-    MCIERROR perr = oerr == 0 ? mciSendStringA("play doom_bgm from 0", NULL, 0, NULL) : 9999;
-    if (oerr == 0 && perr == 0) {
-        music_paused = false;
+    strncpy(pending_mid_path, current_mid_path, sizeof(pending_mid_path) - 1);
+    pending_mid_path[sizeof(pending_mid_path) - 1] = '\0';
+
+    if (music_thread) {
+        WaitForSingleObject(music_thread, 200);
+        CloseHandle(music_thread);
+        music_thread = NULL;
     }
+    music_thread = CreateThread(NULL, 0, music_worker, NULL, 0, NULL);
 }
 
 void I_StopSong(int h)
 {
     (void)h;
+    if (music_thread) {
+        WaitForSingleObject(music_thread, 200);
+        CloseHandle(music_thread);
+        music_thread = NULL;
+    }
     mciSendStringA("stop doom_bgm", NULL, 0, NULL);
     mciSendStringA("close doom_bgm", NULL, 0, NULL);
     music_playing = false;
@@ -326,6 +355,11 @@ void I_StopSong(int h)
 void I_UnRegisterSong(int h)
 {
     (void)h;
+    if (music_thread) {
+        WaitForSingleObject(music_thread, 300);
+        CloseHandle(music_thread);
+        music_thread = NULL;
+    }
     if (current_mid_path[0]) {
         DeleteFileA(current_mid_path);
         current_mid_path[0] = '\0';

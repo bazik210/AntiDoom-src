@@ -256,6 +256,7 @@ ticcmd_t *I_BaseTiccmd(void) { return &emptycmd; }
 int I_GetHeapSize(void) { return mb_used * 1024 * 1024; }
 byte *I_ZoneBase(int *size) { *size = I_GetHeapSize(); return (byte*)malloc(*size); }
 int I_GetTime(void) { return (int)(GetTickCount64() * TICRATE / 1000); }
+unsigned long long I_GetTimeMs(void) { return (unsigned long long)GetTickCount64(); }
 void I_Tactile(int on, int off, int total) { (void)on;(void)off;(void)total; }
 void I_Init(void) { I_InitSound(); }
 void I_WaitVBL(int count) { Sleep((DWORD)(count * 1000 / 70)); }

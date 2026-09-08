@@ -349,6 +349,12 @@ void D_Display (void)
 	M_Drawer ();                            // menu is drawn even on top of wipes
 	I_FinishUpdate ();                      // page flip or blit buffer
 	I_StartTic ();
+#ifndef SNDSERV
+	I_UpdateSound();
+#endif
+#ifndef SNDINTR
+	I_SubmitSound();
+#endif
     } while (!done);
     wiping = false;
     eventhead = eventtail = 0;
