@@ -193,6 +193,8 @@ extern  boolean setsizeneeded;
 extern  int             showMessages;
 void R_ExecuteSetViewSize (void);
 
+boolean wiping = false;
+
 void D_Display (void)
 {
     static  boolean		viewactivestate = false;
@@ -208,6 +210,7 @@ void D_Display (void)
     boolean			done;
     boolean			wipe;
     boolean			redrawsbar;
+    wiping = false;
 
     if (nodrawers)
 	return;                    // for comparative timing / profiling
@@ -339,12 +342,32 @@ void D_Display (void)
 	    tics = nowtime - wipestart;
 	} while (!tics);
 	wipestart = nowtime;
+	wiping = true;
 	done = wipe_ScreenWipe(wipe_Melt
 			       , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
 	I_UpdateNoBlit ();
 	M_Drawer ();                            // menu is drawn even on top of wipes
 	I_FinishUpdate ();                      // page flip or blit buffer
+	I_StartTic ();
     } while (!done);
+    wiping = false;
+    eventhead = eventtail = 0;
+    I_CaptureMouse(true);
+    I_ResetMouse();
+    extern void D_ResetTimer(void);
+    D_ResetTimer();
+    extern boolean level_weapon_ready;
+    extern boolean prev_weapon_ready;
+    if (gamestate == GS_LEVEL && !level_weapon_ready) {
+        player_t *p = &players[consoleplayer];
+        statenum_t upstate = weaponinfo[p->readyweapon].upstate;
+        if (p->psprites[ps_weapon].state != NULL &&
+            p->psprites[ps_weapon].state != &states[upstate])
+        {
+            level_weapon_ready = true;
+            prev_weapon_ready = true;
+        }
+    }
 }
 
 

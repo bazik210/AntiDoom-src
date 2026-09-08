@@ -633,12 +633,19 @@ int	oldnettics;
 
 extern	boolean	advancedemo;
 
+static int oldentertics = 0;
+
+void D_ResetTimer (void)
+{
+    oldentertics = I_GetTime () / ticdup;
+    gametime = oldentertics;
+}
+
 void TryRunTics (void)
 {
     int		i;
     int		lowtic;
     int		entertic;
-    static int	oldentertics;
     int		realtics;
     int		availabletics;
     int		counts;
@@ -763,5 +770,8 @@ void TryRunTics (void)
 	    }
 	}
 	NetUpdate ();	// check for new console commands
+	extern gamestate_t wipegamestate;
+	if (gamestate == GS_LEVEL && wipegamestate != GS_LEVEL)
+	    break;
     }
 }

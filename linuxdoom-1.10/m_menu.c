@@ -1432,9 +1432,9 @@ boolean M_Responder (event_t* ev)
     }
     else
     {
-	if (ev->type == ev_mouse && mousewait < I_GetTime())
+	if (ev->type == ev_mouse)
 	{
-	    if (menu_mouse == 1)
+	    if (menu_mouse == 1 && mousewait < I_GetTime())
 	    {
 		mousey += ev->data3;
 		if (mousey < lasty-30)
@@ -1803,8 +1803,9 @@ void M_StartControlPanel (void)
     menuactive = 1;
     currentMenu = &MainDef;         // JDC
     itemOn = currentMenu->lastOn;   // JDC
-    mousewait = I_GetTime() + 8;
-    last_menu_buttons = 0;
+    mousewait = 0;
+    extern int mouse_buttons;
+    last_menu_buttons = mouse_buttons;
     S_StartSound(NULL, sfx_swtchn);
 }
 
@@ -1903,6 +1904,7 @@ void M_SetupNextMenu(menu_t *menudef)
 {
     currentMenu = menudef;
     itemOn = currentMenu->lastOn;
+    mousewait = 0;
 }
 
 

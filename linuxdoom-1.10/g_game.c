@@ -168,6 +168,7 @@ int		novert = 1;
 int		mlook = 1;
 int		lookdir = 0;
 boolean	level_weapon_ready = false;
+boolean		prev_weapon_ready = false;
  
 int             mousebfire; 
 int             mousebstrafe; 
@@ -518,7 +519,9 @@ void G_DoLoadLevel (void)
     mousex = mousey = 0; 
     lookdir = 0;
     level_weapon_ready = false;
+    prev_weapon_ready = false;
     I_CaptureMouse(true);
+    I_ResetMouse();
     sendpause = sendsave = paused = false; 
     memset (mousebuttons, 0, sizeof(mousebuttons)); 
     memset (joybuttons, 0, sizeof(joybuttons)); 
@@ -624,21 +627,12 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[0] = ev->data1 & 1; 
 	mousebuttons[1] = ev->data1 & 2; 
 	mousebuttons[2] = ev->data1 & 4; 
-	if (gamestate == GS_LEVEL && !level_weapon_ready)
-	{
-	    mousebuttons[0] = 0;
-	    mousex = mousey = 0;
-	    return true;
-	}
-	static boolean prev_weapon_ready = false;
-	if (gamestate == GS_LEVEL && !prev_weapon_ready)
+	if (gamestate == GS_LEVEL && (!level_weapon_ready || !prev_weapon_ready))
 	{
 	    if (level_weapon_ready)
-	    {
 	        prev_weapon_ready = true;
-	        mousex = mousey = 0;
-	        return true;
-	    }
+	    mousebuttons[0] = 0;
+	    mousex = mousey = 0;
 	    return true;
 	}
 	if (!level_weapon_ready)
@@ -1330,7 +1324,12 @@ void G_DoLoadGame (void)
     
     // draw the pattern into the back screen
     R_FillBackScreen ();   
-    level_weapon_ready = true;
+    level_weapon_ready = false;
+    prev_weapon_ready = false;
+    mousex = mousey = 0;
+    lookdir = 0;
+    D_ResetTimer ();
+    I_ResetMouse ();
 } 
  
 

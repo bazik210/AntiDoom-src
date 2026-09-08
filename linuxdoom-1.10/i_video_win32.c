@@ -21,7 +21,7 @@ static int window_width = 960;
 static int window_height = 600;
 static boolean closing;
 static boolean fullscreen;
-static int mouse_buttons;
+int mouse_buttons = 0;
 static boolean mouse_captured;
 static int mouse_accum_x = 0;
 static int mouse_accum_y = 0;
@@ -44,6 +44,19 @@ void I_CaptureMouse(boolean capture)
     } else {
         ClipCursor(NULL);
         while (ShowCursor(TRUE) < 0);
+    }
+}
+
+void I_ResetMouse(void)
+{
+    mouse_accum_x = 0;
+    mouse_accum_y = 0;
+    if (win && mouse_captured) {
+        RECT rc;
+        GetClientRect(win, &rc);
+        POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        ClientToScreen(win, &pt);
+        SetCursorPos(pt.x, pt.y);
     }
 }
 
@@ -252,7 +265,8 @@ void I_StartTic(void)
         TranslateMessage(&msg); DispatchMessage(&msg);
     }
     extern boolean level_weapon_ready;
-    if (gamestate == GS_LEVEL && !level_weapon_ready) {
+    extern boolean wiping;
+    if (wiping || (gamestate == GS_LEVEL && !level_weapon_ready)) {
         mouse_accum_x = 0;
         mouse_accum_y = 0;
     }
