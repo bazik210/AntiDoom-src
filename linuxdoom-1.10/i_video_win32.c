@@ -62,10 +62,21 @@ void I_ResetMouse(void)
 
 static void I_UpdateMouseCapture(void)
 {
+    HWND fg = GetForegroundWindow();
     HWND active = GetActiveWindow();
     extern int menu_mouse;
-    boolean want_capture = (active == win && GetForegroundWindow() == win &&
-                           (fullscreen || !menuactive || !menu_mouse));
+    boolean is_fg = (fg == win || active == win);
+    if (!is_fg && fg) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        if (pid == GetCurrentProcessId()) is_fg = true;
+    }
+    if (fullscreen && !is_fg) {
+        SetForegroundWindow(win);
+        SetFocus(win);
+        is_fg = true;
+    }
+    boolean want_capture = (is_fg && (fullscreen || !menuactive || !menu_mouse));
     I_CaptureMouse(want_capture);
 }
 
@@ -126,6 +137,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         }
         return DefWindowProc(h, msg, w, l);
     }
+    case WM_ACTIVATE:
+        if (LOWORD(w) != WA_INACTIVE) {
+            I_UpdateMouseCapture();
+        } else if (!fullscreen) {
+            I_CaptureMouse(false);
+        }
+        return 0;
     case WM_LBUTTONDOWN: {
         mouse_buttons |= 1;
         extern int menu_mouse;
@@ -266,6 +284,20 @@ void I_InitGraphics(void)
     rgb = (unsigned int*)malloc(SCREENWIDTH * SCREENHEIGHT * sizeof(unsigned int));
     screens[0] = (byte*)malloc(SCREENWIDTH * SCREENHEIGHT);
     ShowWindow(win, maximize ? SW_MAXIMIZE : SW_SHOW); UpdateWindow(win);
+    SetWindowPos(win, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    DWORD curThread = GetCurrentThreadId();
+    DWORD fgThread = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+    if (curThread != fgThread) {
+        AttachThreadInput(curThread, fgThread, TRUE);
+        SetForegroundWindow(win);
+        SetFocus(win);
+        SetActiveWindow(win);
+        AttachThreadInput(curThread, fgThread, FALSE);
+    } else {
+        SetForegroundWindow(win);
+        SetFocus(win);
+        SetActiveWindow(win);
+    }
     I_UpdateMouseCapture();
     I_Log("Video: %dx%d (%s), Internal Canvas: %dx%d\n", window_width, window_height, fullscreen ? "fullscreen" : "windowed", SCREENWIDTH, SCREENHEIGHT);
     s = getenv("DOOM_WIN32_RES"); (void)s;

@@ -670,6 +670,8 @@ static void LaunchGame(HWND hWnd)
     si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
 
+    AllowSetForegroundWindow(ASFW_ANY);
+
     if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         wchar_t err[1024];
         if (current_lang == 0) {
