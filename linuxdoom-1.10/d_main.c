@@ -1271,8 +1271,6 @@ void D_DoomMain (void)
 	else
 	{
 	    D_StartTitle ();                // start up intro loop
-	    if (bot_active)
-		M_StartControlPanel ();
 	}
 
     }
