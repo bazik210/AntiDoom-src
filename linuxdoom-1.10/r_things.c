@@ -752,6 +752,13 @@ void R_DrawPlayerSprites (void)
     int		i;
     int		lightnum;
     pspdef_t*	psp;
+    int		saved_centery;
+    fixed_t	saved_centeryfrac;
+
+    saved_centery = centery;
+    saved_centeryfrac = centeryfrac;
+    centery = viewheight / 2;
+    centeryfrac = centery << FRACBITS;
     
     // get light level
     lightnum =
@@ -777,6 +784,9 @@ void R_DrawPlayerSprites (void)
 	if (psp->state)
 	    R_DrawPSprite (psp);
     }
+
+    centery = saved_centery;
+    centeryfrac = saved_centeryfrac;
 }
 
 
