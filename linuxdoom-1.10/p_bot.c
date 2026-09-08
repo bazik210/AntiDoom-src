@@ -89,6 +89,10 @@ static int bot_path_len = 0;
 static int bot_path_step = 0;
 static int bot_replan_timer = 0;
 
+// Door interaction state
+static line_t* bot_use_door = NULL;
+static int bot_door_use_cooldown = 0;
+
 // Check if a line is an exit trigger or switch
 static boolean Bot_IsExitLine(line_t* line)
 {
@@ -156,9 +160,22 @@ static boolean Bot_IsDoor(line_t* line)
 // Check if door is currently closed
 static boolean Bot_IsDoorClosed(line_t* line)
 {
-    if (!line || !line->backsector) return false;
-    fixed_t h = line->backsector->ceilingheight - line->backsector->floorheight;
-    if (h < 56*FRACUNIT) return true;
+    if (!line) return false;
+
+    sector_t* front = line->frontsector;
+    sector_t* back  = line->backsector;
+
+    if (!front || !back)
+        return false;
+
+    fixed_t front_h = front->ceilingheight - front->floorheight;
+    fixed_t back_h  = back->ceilingheight - back->floorheight;
+
+    // Door is closed if either side still has a player-blocking opening.
+    // This also works regardless of which side the bot approaches from.
+    if (front_h < 56*FRACUNIT || back_h < 56*FRACUNIT)
+        return true;
+
     return false;
 }
 
@@ -275,6 +292,8 @@ void Bot_InitLevel(void)
     bot_path_len = 0;
     bot_path_step = 0;
     bot_replan_timer = 0;
+	bot_use_door = NULL;
+	bot_door_use_cooldown = 0;
 
     I_Log("Bot: Initializing navigation graph for level...\n");
 
@@ -828,19 +847,44 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
 
         fixed_t d_wp = P_AproxDistance(player->mo->x - tx, player->mo->y - ty);
 
-        // Check if current waypoint reached
-        fixed_t reach_dist = (bot_wp[cur_target_wp].type == WP_DOOR) ? 64*FRACUNIT : 48*FRACUNIT;
-        if (d_wp < reach_dist)
-        {
-            bot_wp[cur_target_wp].visits++;
-            bot_path_step++;
-            if (bot_path_step < bot_path_len)
-            {
-                cur_target_wp = bot_path_cache[bot_path_step];
-                tx = bot_wp[cur_target_wp].x;
-                ty = bot_wp[cur_target_wp].y;
-            }
-        }
+		// Check if current waypoint reached
+		boolean can_advance = false;
+
+		if (bot_wp[cur_target_wp].type == WP_DOOR)
+		{
+			/*
+			 * The door waypoint itself is only an interaction point.
+			 * Do not wait for sector geometry here; let the movement
+			 * code push through the doorway once Doom has opened it.
+			 */
+			if (d_wp < 32*FRACUNIT)
+				can_advance = true;
+		}
+		else
+		{
+			if (d_wp < 48*FRACUNIT)
+				can_advance = true;
+		}
+
+		if (can_advance)
+		{
+			bot_wp[cur_target_wp].visits++;
+			bot_path_step++;
+
+			// Door was successfully opened/passed.
+			if (bot_wp[cur_target_wp].type == WP_DOOR)
+			{
+				bot_use_door = NULL;
+				bot_door_use_cooldown = 0;
+			}
+
+			if (bot_path_step < bot_path_len)
+			{
+				cur_target_wp = bot_path_cache[bot_path_step];
+				tx = bot_wp[cur_target_wp].x;
+				ty = bot_wp[cur_target_wp].y;
+			}
+		}
     }
     else if (bot_current_target_wp >= 0 && bot_current_target_wp < bot_num_wp)
     {
@@ -849,23 +893,88 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
     }
 
     boolean facing_interaction = false;
+	boolean waiting_for_door = false;
 
     // 5. Door and Exit Switch Handling
     if (cur_target_wp >= 0)
     {
         fixed_t d_targ = P_AproxDistance(player->mo->x - bot_wp[cur_target_wp].x, player->mo->y - bot_wp[cur_target_wp].y);
 
-        if (bot_wp[cur_target_wp].type == WP_DOOR && d_targ < 96*FRACUNIT)
-        {
-            if (Bot_HasKey(player, bot_wp[cur_target_wp].required_key))
-            {
-                // Face door and pulse USE
-                angle_t door_ang = R_PointToAngle2(player->mo->x, player->mo->y, bot_wp[cur_target_wp].x, bot_wp[cur_target_wp].y);
-                cmd->angleturn = (short)((door_ang - player->mo->angle) >> 16);
-                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
-                facing_interaction = true;
-            }
-        }
+		if (bot_wp[cur_target_wp].type == WP_DOOR && d_targ < 100*FRACUNIT)
+		{
+			line_t* door = bot_wp[cur_target_wp].line;
+
+			if (door &&
+				Bot_HasKey(player, bot_wp[cur_target_wp].required_key))
+			{
+				angle_t door_ang = R_PointToAngle2(
+					player->mo->x,
+					player->mo->y,
+					bot_wp[cur_target_wp].x,
+					bot_wp[cur_target_wp].y);
+
+				int turn = (short)((door_ang - player->mo->angle) >> 16);
+
+				cmd->angleturn = turn;
+
+				/*
+				 * First get close enough for Doom's P_UseLines.
+				 * 64 units is approximately the maximum USE range,
+				 * so aim for <= 56 units.
+				 */
+				if (d_targ > 56*FRACUNIT)
+				{
+					// Still too far away: approach the door.
+					waiting_for_door = false;
+					facing_interaction = false;
+				}
+				else
+				{
+					/*
+					 * We are close enough. Stop movement while interacting.
+					 */
+					facing_interaction = true;
+					waiting_for_door = true;
+
+					if (!Bot_IsDoorClosed(door))
+					{
+						// Door is open/opening.
+						bot_use_door = NULL;
+						bot_door_use_cooldown = 0;
+						waiting_for_door = false;
+					}
+					else
+					{
+						if (bot_door_use_cooldown > 0)
+							bot_door_use_cooldown--;
+
+						/*
+						 * Do NOT press USE until we are actually facing
+						 * the door. Otherwise USE happens before the
+						 * requested angleturn has taken effect.
+						 *
+						 * 700 ~= 6 degrees.
+						 */
+						if (abs(turn) < 700)
+						{
+							if (bot_use_door != door)
+							{
+								cmd->buttons |= BT_USE;
+								bot_use_door = door;
+
+								// Retry after ~1 second if nothing happened.
+								bot_door_use_cooldown = 35;
+							}
+							else if (bot_door_use_cooldown <= 0)
+							{
+								cmd->buttons |= BT_USE;
+								bot_door_use_cooldown = 35;
+							}
+						}
+					}
+				}
+			}
+		}
         else if (bot_wp[cur_target_wp].type == WP_EXIT && d_targ < 72*FRACUNIT)
         {
             // Face exit switch line center and pulse USE
@@ -879,29 +988,6 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
                 facing_interaction = true;
             }
             if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
-        }
-    }
-
-    // Also check immediate proximity (64 units) for any closed unlocked doors to tap
-    for (int i = 0; i < numlines; i++)
-    {
-        line_t* li = &lines[i];
-        if (li->special == 0) continue;
-
-        fixed_t lmx = (li->v1->x + li->v2->x) / 2;
-        fixed_t lmy = (li->v1->y + li->v2->y) / 2;
-        fixed_t ld = P_AproxDistance(player->mo->x - lmx, player->mo->y - lmy);
-
-        if (ld < 68*FRACUNIT)
-        {
-            if (Bot_IsDoor(li) && Bot_IsDoorClosed(li) && Bot_HasKey(player, Bot_DoorRequiredKey(li)))
-            {
-                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
-            }
-            else if (Bot_IsExitLine(li))
-            {
-                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
-            }
         }
     }
 
@@ -922,82 +1008,99 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
     fixed_t fwd_x = player->mo->x + FixedMul(36*FRACUNIT, finecosine[an]);
     fixed_t fwd_y = player->mo->y + FixedMul(36*FRACUNIT, finesine[an]);
 
-    boolean front_clear = P_CheckPosition(player->mo, fwd_x, fwd_y);
+	boolean front_clear = P_CheckPosition(player->mo, fwd_x, fwd_y);
 
-    if (front_clear)
-    {
-        // Clear ahead: run full speed forward
-        cmd->forwardmove = BOT_MAXMOVE;
-    }
-    else
-    {
-        // Obstacle ahead: test diagonal whisker feelers
-        int an_l = (player->mo->angle + ANG45) >> ANGLETOFINESHIFT;
-        int an_r = (player->mo->angle - ANG45) >> ANGLETOFINESHIFT;
+	if (waiting_for_door)
+	{
+		/*
+		 * Door is being interacted with but is still closed.
+		 * Stay still instead of repeatedly walking into it.
+		 */
+		cmd->forwardmove = 0;
+		cmd->sidemove = 0;
+	}
+	else if (front_clear)
+	{
+		// Clear ahead: run full speed forward
+		cmd->forwardmove = BOT_MAXMOVE;
+	}
+	else
+	{
+		// Obstacle ahead: test diagonal whisker feelers
+		int an_l = (player->mo->angle + ANG45) >> ANGLETOFINESHIFT;
+		int an_r = (player->mo->angle - ANG45) >> ANGLETOFINESHIFT;
 
-        fixed_t left_x = player->mo->x + FixedMul(32*FRACUNIT, finecosine[an_l]);
-        fixed_t left_y = player->mo->y + FixedMul(32*FRACUNIT, finesine[an_l]);
+		fixed_t left_x = player->mo->x +
+			FixedMul(32*FRACUNIT, finecosine[an_l]);
+		fixed_t left_y = player->mo->y +
+			FixedMul(32*FRACUNIT, finesine[an_l]);
 
-        fixed_t right_x = player->mo->x + FixedMul(32*FRACUNIT, finecosine[an_r]);
-        fixed_t right_y = player->mo->y + FixedMul(32*FRACUNIT, finesine[an_r]);
+		fixed_t right_x = player->mo->x +
+			FixedMul(32*FRACUNIT, finecosine[an_r]);
+		fixed_t right_y = player->mo->y +
+			FixedMul(32*FRACUNIT, finesine[an_r]);
 
-        boolean left_clear = P_CheckPosition(player->mo, left_x, left_y);
-        boolean right_clear = P_CheckPosition(player->mo, right_x, right_y);
+		boolean left_clear =
+			P_CheckPosition(player->mo, left_x, left_y);
+		boolean right_clear =
+			P_CheckPosition(player->mo, right_x, right_y);
 
-        if (left_clear && !right_clear)
-        {
-            // Steer & strafe left around obstacle
-            cmd->forwardmove = 30;
-            cmd->sidemove = -35;
-            cmd->angleturn += 600;
-        }
-        else if (right_clear && !left_clear)
-        {
-            // Steer & strafe right around obstacle
-            cmd->forwardmove = 30;
-            cmd->sidemove = 35;
-            cmd->angleturn -= 600;
-        }
-        else if (left_clear && right_clear)
-        {
-            // Both sides open: choose side closer to target
-            fixed_t dl = P_AproxDistance(left_x - tx, left_y - ty);
-            fixed_t dr = P_AproxDistance(right_x - tx, right_y - ty);
-            if (dl < dr)
-            {
-                cmd->forwardmove = 25;
-                cmd->sidemove = -35;
-                cmd->angleturn += 500;
-            }
-            else
-            {
-                cmd->forwardmove = 25;
-                cmd->sidemove = 35;
-                cmd->angleturn -= 500;
-            }
-        }
-        else
-        {
-            // Corner or door in front:
-            if (cur_target_wp >= 0 && bot_wp[cur_target_wp].type == WP_DOOR)
-            {
-                cmd->forwardmove = 30; // Keep pushing through opening door
-            }
-            else
-            {
-                cmd->forwardmove = -15;
-                cmd->sidemove = (signed char)(bot_strafe_dir * 35);
-                cmd->angleturn = 800;
-            }
-        }
-    }
+		if (left_clear && !right_clear)
+		{
+			cmd->forwardmove = 30;
+			cmd->sidemove = -35;
+			cmd->angleturn += 600;
+		}
+		else if (right_clear && !left_clear)
+		{
+			cmd->forwardmove = 30;
+			cmd->sidemove = 35;
+			cmd->angleturn -= 600;
+		}
+		else if (left_clear && right_clear)
+		{
+			fixed_t dl = P_AproxDistance(
+				left_x - tx, left_y - ty);
+			fixed_t dr = P_AproxDistance(
+				right_x - tx, right_y - ty);
+
+			if (dl < dr)
+			{
+				cmd->forwardmove = 25;
+				cmd->sidemove = -35;
+				cmd->angleturn += 500;
+			}
+			else
+			{
+				cmd->forwardmove = 25;
+				cmd->sidemove = 35;
+				cmd->angleturn -= 500;
+			}
+		}
+		else
+		{
+			/*
+			 * Completely blocked.
+			 * If this isn't a door interaction, perform normal
+			 * stuck avoidance.
+			 */
+			cmd->forwardmove = -15;
+			cmd->sidemove =
+				(signed char)(bot_strafe_dir * 35);
+			cmd->angleturn = 800;
+		}
+	}
 
     // 8. Anti-Stuck Maneuver (no generic wall grunting)
     fixed_t dist_moved = P_AproxDistance(player->mo->x - bot_last_x, player->mo->y - bot_last_y);
     bot_last_x = player->mo->x;
     bot_last_y = player->mo->y;
 
-    if (dist_moved < 8*FRACUNIT)
+	if (waiting_for_door)
+	{
+		bot_stuck_tics = 0;
+	}
+	else if (dist_moved < 8*FRACUNIT)
     {
         if (++bot_stuck_tics > 15)
         {
