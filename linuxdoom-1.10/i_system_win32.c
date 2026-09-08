@@ -45,7 +45,7 @@ static LONG WINAPI I_CrashHandler(PEXCEPTION_POINTERS ep)
     ShowCursor(TRUE);
 
     if (!doom_logfile)
-        doom_logfile = fopen("doom2.log", "a");
+        doom_logfile = fopen("antidoom.log", "a");
 
     FILE *f = doom_logfile ? doom_logfile : stderr;
 
@@ -207,13 +207,13 @@ static LONG WINAPI I_CrashHandler(PEXCEPTION_POINTERS ep)
 
     char alertMsg[1024];
     snprintf(alertMsg, sizeof(alertMsg),
-             "DOOM II Win32 encountered a fatal crash!\n\n"
+             "AntiDoom Win32 encountered a fatal crash!\n\n"
              "Exception: %s (0x%08lX)\n"
              "Fault Address: 0x%p\n\n"
              "Detailed call stack trace and game state have been written to doom2.log\n"
              "A crash minidump was saved to doom2_crash.dmp",
              excName, (unsigned long)code, ep->ExceptionRecord->ExceptionAddress);
-    MessageBoxA(NULL, alertMsg, "DOOM II - Crash Report", MB_OK | MB_ICONERROR);
+    MessageBoxA(NULL, alertMsg, "AntiDoom - Crash Report", MB_OK | MB_ICONERROR);
 
     ExitProcess(code);
     return EXCEPTION_EXECUTE_HANDLER;
@@ -222,14 +222,14 @@ static LONG WINAPI I_CrashHandler(PEXCEPTION_POINTERS ep)
 void I_InitLog(void)
 {
     AddVectoredExceptionHandler(1, I_CrashHandler);
-    doom_logfile = fopen("doom2.log", "w");
+    doom_logfile = fopen("antidoom.log", "w");
     if (!doom_logfile) return;
     time_t t = time(NULL);
     struct tm *lt = localtime(&t);
     char timebuf[64] = "unknown";
     if (lt) strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", lt);
     fprintf(doom_logfile, "===================================================================\n");
-    fprintf(doom_logfile, " DOOM II Win32 Port v1.10 (Antigravity Enhanced)\n");
+    fprintf(doom_logfile, " AntiDoom Win32 Port v1.10 (Antigravity Enhanced)\n");
     fprintf(doom_logfile, " Started: %s\n", timebuf);
     fprintf(doom_logfile, " Build:   %s %s\n", __DATE__, __TIME__);
     fprintf(doom_logfile, "===================================================================\n\n");

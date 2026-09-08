@@ -251,7 +251,7 @@ void I_InitGraphics(void)
         if (r.right-r.left > work.right-work.left) r.right = r.left + work.right-work.left;
         if (r.bottom-r.top > work.bottom-work.top) r.bottom = r.top + work.bottom-work.top;
     }
-    win = CreateWindow("DoomWin32", "DOOM II - Win32 port", fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW,
+    win = CreateWindow("DoomWin32", "AntiDoom - Win32 Port", fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW,
                        fullscreen ? mi.rcMonitor.left : work.left + ((work.right-work.left)-(r.right-r.left))/2,
                        fullscreen ? mi.rcMonitor.top : work.top + ((work.bottom-work.top)-(r.bottom-r.top))/2,
                        fullscreen ? w : r.right-r.left, fullscreen ? h : r.bottom-r.top,

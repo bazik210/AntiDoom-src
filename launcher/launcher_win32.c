@@ -36,12 +36,27 @@
 #define IDC_BTN_SAVE        121
 #define IDC_BTN_EXIT        122
 #define IDC_CHK_QUICKSTART  123
+#define IDC_CHK_JUMP        124
+#define IDC_BTN_LANG        125
+
+// Static Label IDs for dynamic translation
+#define IDC_LBL_IWAD        201
+#define IDC_LBL_PRESET      202
+#define IDC_LBL_PWAD        203
+#define IDC_LBL_RES         204
+#define IDC_LBL_SKILL       205
+#define IDC_LBL_WARP        206
+#define IDC_LBL_EXTRA       207
 
 static HWND hIwadPath, hIwadPreset, hPwadPath;
 static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect;
-static HWND hChkBot, hChkMlook, hChkMenuMouse, hChkFast, hChkNoMonsters, hChkRespawn;
+static HWND hChkBot, hChkMlook, hChkMenuMouse, hChkFast, hChkNoMonsters, hChkRespawn, hChkJUMP;
 static HWND hSkillCombo, hWarpEdit, hChkQuickStart, hExtraEdit, hChkCloseStart;
-static HWND hBtnLaunch, hBtnSave, hBtnExit, hIwadBrowse, hPwadBrowse;
+static HWND hBtnLaunch, hBtnSave, hBtnExit, hIwadBrowse, hPwadBrowse, hBtnLang;
+
+// Static Label HWNDs
+static HWND hLblIwad, hLblPreset, hLblPwad, hLblRes, hLblSkill, hLblWarp, hLblExtra;
+static HWND hMainWnd = NULL;
 
 static HFONT hFontTitle, hFontSub, hFontMain, hFontBold, hFontLaunch, hFontBtn;
 static HBRUSH hBrushBg, hBrushPanel, hBrushEdit;
@@ -50,6 +65,9 @@ static COLORREF colPanel = RGB(36, 39, 47);
 static COLORREF colText = RGB(225, 230, 240);
 static COLORREF colGold = RGB(235, 195, 75);
 static COLORREF colGray = RGB(150, 155, 168);
+
+// Language: 0 = Russian, 1 = English
+static int current_lang = 0;
 
 typedef struct {
     int w;
@@ -68,12 +86,20 @@ typedef struct {
 static FoundWad found_wads[64];
 static int found_wad_count = 0;
 
-static const wchar_t* skill_list[] = {
+static const wchar_t* skill_list_ru[] = {
     L"1: I'm too young to die (Легко)",
     L"2: Hey, not too rough (Умеренно)",
     L"3: Hurt me plenty (Нормально)",
     L"4: Ultra-Violence (Сложно)",
     L"5: Nightmare! (Кошмар)"
+};
+
+static const wchar_t* skill_list_en[] = {
+    L"1: I'm too young to die (Easy)",
+    L"2: Hey, not too rough (Medium)",
+    L"3: Hurt me plenty (Normal)",
+    L"4: Ultra-Violence (Hard)",
+    L"5: Nightmare! (Nightmare)"
 };
 
 static void GetLauncherDir(wchar_t* outDir, int maxLen)
@@ -95,18 +121,21 @@ static void InitResolutions(void)
     // #0 is ALWAYS native screen resolution (Default!)
     res_options[res_count].w = scrW;
     res_options[res_count].h = scrH;
-    swprintf(res_options[res_count].label, 64, L"%dx%d (Текущий экран)", scrW, scrH);
+    if (current_lang == 0)
+        swprintf(res_options[res_count].label, 64, L"%dx%d (Текущий экран)", scrW, scrH);
+    else
+        swprintf(res_options[res_count].label, 64, L"%dx%d (Native Screen)", scrW, scrH);
     res_count++;
 
-    static const struct { int w; int h; const wchar_t* desc; } presets[] = {
-        { 1920, 1080, L"Full HD" },
-        { 1920, 1200, L"16:10 Full HD" },
-        { 2560, 1440, L"2K QHD" },
-        { 3840, 2160, L"4K UHD" },
-        { 1600, 1000, L"5x (16:10)" },
-        { 1280, 800,  L"4x HD (16:10)" },
-        { 960,  600,  L"3x (16:10)" },
-        { 640,  400,  L"2x Классика" }
+    static const struct { int w; int h; const wchar_t* desc_ru; const wchar_t* desc_en; } presets[] = {
+        { 1920, 1080, L"Full HD", L"Full HD" },
+        { 1920, 1200, L"16:10 Full HD", L"16:10 Full HD" },
+        { 2560, 1440, L"2K QHD", L"2K QHD" },
+        { 3840, 2160, L"4K UHD", L"4K UHD" },
+        { 1600, 1000, L"5x (16:10)", L"5x (16:10)" },
+        { 1280, 800,  L"4x HD (16:10)", L"4x HD (16:10)" },
+        { 960,  600,  L"3x (16:10)", L"3x (16:10)" },
+        { 640,  400,  L"2x Классика", L"2x Classic" }
     };
 
     for (int i = 0; i < (int)(sizeof(presets)/sizeof(presets[0])); i++) {
@@ -114,9 +143,64 @@ static void InitResolutions(void)
             continue; // avoid duplicate
         res_options[res_count].w = presets[i].w;
         res_options[res_count].h = presets[i].h;
-        swprintf(res_options[res_count].label, 64, L"%dx%d (%ls)", presets[i].w, presets[i].h, presets[i].desc);
+        const wchar_t* desc = (current_lang == 0) ? presets[i].desc_ru : presets[i].desc_en;
+        swprintf(res_options[res_count].label, 64, L"%dx%d (%ls)", presets[i].w, presets[i].h, desc);
         res_count++;
     }
+}
+
+static void GetWadTitle(const wchar_t *path, const wchar_t *fileName, wchar_t *outTitle, size_t maxChars)
+{
+    FILE *f = _wfopen(path, L"rb");
+    if (f) {
+        char magic[4];
+        int numlumps = 0, infotableofs = 0;
+        if (fread(magic, 4, 1, f) == 1 && (memcmp(magic, "IWAD", 4) == 0 || memcmp(magic, "PWAD", 4) == 0) &&
+            fread(&numlumps, 4, 1, f) == 1 &&
+            fread(&infotableofs, 4, 1, f) == 1) {
+            if (numlumps > 0 && numlumps < 50000 && fseek(f, infotableofs, SEEK_SET) == 0) {
+                int has_map01 = 0, has_e1m1 = 0, has_e2m1 = 0, has_e4m1 = 0, has_m_epi4 = 0;
+                int has_camo1 = 0, has_redmin6 = 0;
+                for (int i = 0; i < numlumps; i++) {
+                    int filepos, size;
+                    char name[9] = {0};
+                    if (fread(&filepos, 4, 1, f) != 1 ||
+                        fread(&size, 4, 1, f) != 1 ||
+                        fread(name, 8, 1, f) != 1) break;
+                    for (int c = 0; c < 8 && name[c]; c++) {
+                        if (name[c] >= 'a' && name[c] <= 'z') name[c] -= 32;
+                    }
+                    if (strcmp(name, "MAP01") == 0) has_map01 = 1;
+                    else if (strcmp(name, "E1M1") == 0) has_e1m1 = 1;
+                    else if (strcmp(name, "E2M1") == 0) has_e2m1 = 1;
+                    else if (strcmp(name, "E4M1") == 0) has_e4m1 = 1;
+                    else if (strcmp(name, "M_EPI4") == 0) has_m_epi4 = 1;
+                    else if (strcmp(name, "CAMO1") == 0) has_camo1 = 1;
+                    else if (strcmp(name, "REDMIN6") == 0) has_redmin6 = 1;
+                }
+                fclose(f);
+                if (has_map01) {
+                    if (has_camo1 || wcsstr(fileName, L"PLUTONIA") || wcsstr(fileName, L"plutonia"))
+                        wcsncpy(outTitle, L"Final DOOM: Plutonia", maxChars);
+                    else if (has_redmin6 || wcsstr(fileName, L"TNT") || wcsstr(fileName, L"tnt"))
+                        wcsncpy(outTitle, L"Final DOOM: TNT Evilution", maxChars);
+                    else
+                        wcsncpy(outTitle, L"DOOM II: Hell on Earth", maxChars);
+                    return;
+                } else if (has_e1m1) {
+                    if (has_e4m1 && has_m_epi4)
+                        wcsncpy(outTitle, L"The Ultimate DOOM", maxChars);
+                    else if (has_e2m1)
+                        wcsncpy(outTitle, (current_lang == 0) ? L"DOOM (3 эпизода)" : L"DOOM (3 Episodes)", maxChars);
+                    else
+                        wcsncpy(outTitle, (current_lang == 0) ? L"DOOM (Shareware, 1 эпизод)" : L"DOOM (Shareware, 1 Episode)", maxChars);
+                    return;
+                }
+            }
+        }
+        if (f) fclose(f);
+    }
+    outTitle[0] = L'\0';
 }
 
 static void ScanWadFolder(const wchar_t* targetPath)
@@ -157,16 +241,10 @@ static void ScanWadFolder(const wchar_t* targetPath)
                 swprintf(found_wads[found_wad_count].path, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
             }
 
-            if (_wcsicmp(fd.cFileName, L"DOOM2.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (DOOM II: Hell on Earth)", found_wads[found_wad_count].path);
-            } else if (_wcsicmp(fd.cFileName, L"DOOM.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (The Ultimate DOOM)", found_wads[found_wad_count].path);
-            } else if (_wcsicmp(fd.cFileName, L"DOOM1.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (DOOM / The Ultimate DOOM)", found_wads[found_wad_count].path);
-            } else if (_wcsicmp(fd.cFileName, L"PLUTONIA.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (Final DOOM: Plutonia)", found_wads[found_wad_count].path);
-            } else if (_wcsicmp(fd.cFileName, L"TNT.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (Final DOOM: TNT Evilution)", found_wads[found_wad_count].path);
+            wchar_t title[64] = {0};
+            GetWadTitle(found_wads[found_wad_count].path, fd.cFileName, title, 64);
+            if (title[0]) {
+                swprintf(found_wads[found_wad_count].label, 128, L"%ls (%ls)", found_wads[found_wad_count].path, title);
             } else {
                 swprintf(found_wads[found_wad_count].label, 128, L"%ls", found_wads[found_wad_count].path);
             }
@@ -192,14 +270,116 @@ static void ScanWadFolder(const wchar_t* targetPath)
             SendMessageW(hIwadPreset, CB_SETCURSEL, 0, 0);
         }
     } else {
-        SendMessageW(hIwadPreset, CB_ADDSTRING, 0, (LPARAM)L"(WAD файлы в папке не найдены)");
+        SendMessageW(hIwadPreset, CB_ADDSTRING, 0, (LPARAM)(current_lang == 0 ? L"(WAD файлы в папке не найдены)" : L"(No WAD files found in folder)"));
         SendMessageW(hIwadPreset, CB_SETCURSEL, 0, 0);
+    }
+}
+
+static void ApplyLanguage(int lang)
+{
+    current_lang = lang;
+
+    if (current_lang == 0) {
+        // Russian
+        SetWindowTextW(hMainWnd, L"AntiDoom - Win32 Launcher");
+        SetWindowTextW(hBtnLang, L"[ EN ]");
+
+        SetWindowTextW(hLblIwad, L"Файл игры (IWAD):");
+        SetWindowTextW(hIwadBrowse, L"Обзор...");
+        SetWindowTextW(hLblPreset, L"Обнаруженные WAD:");
+        SetWindowTextW(hLblPwad, L"Дополнительный мод / PWAD (-file):");
+        SetWindowTextW(hPwadBrowse, L"Обзор...");
+
+        SetWindowTextW(hLblRes, L"Разрешение экрана:");
+        SetWindowTextW(hChkKeepAspect, L"Сохранять пропорции 16:10 (-keepaspect)");
+        SetWindowTextW(hChkFullscreen, L"Полный экран (-fullscreen)");
+        SetWindowTextW(hChkMaximized, L"Окно без рамок (-maximized)");
+
+        SetWindowTextW(hChkBot, L"Включить бота (-bot)");
+        SetWindowTextW(hChkMlook, L"Обзор мышью (-mlook)");
+        SetWindowTextW(hChkMenuMouse, L"Курсор мыши в меню (-menumouse)");
+        SetWindowTextW(hChkFast, L"Быстрые монстры (-fast)");
+        SetWindowTextW(hChkNoMonsters, L"Без монстров (-nomonsters)");
+        SetWindowTextW(hChkRespawn, L"Возрождение монстров (-respawn)");
+        SetWindowTextW(hChkJUMP, L"Прыжок (Space) (-jump)");
+        SetWindowTextW(hChkQuickStart, L"Сразу в игру (минуя заставку)");
+
+        SetWindowTextW(hLblSkill, L"Сложность:");
+        SetWindowTextW(hLblWarp, L"Карта (Warp):");
+        SetWindowTextW(hLblExtra, L"Дополнительные параметры:");
+        SetWindowTextW(hChkCloseStart, L"Закрывать ланчер при запуске игры");
+
+        SetWindowTextW(hBtnLaunch, L"►  ЗАПУСТИТЬ ANTIDOOM");
+        SetWindowTextW(hBtnSave, L"Сохранить настройки");
+        SetWindowTextW(hBtnExit, L"Выход");
+    } else {
+        // English
+        SetWindowTextW(hMainWnd, L"AntiDoom - Win32 Launcher");
+        SetWindowTextW(hBtnLang, L"[ RU ]");
+
+        SetWindowTextW(hLblIwad, L"Game IWAD File:");
+        SetWindowTextW(hIwadBrowse, L"Browse...");
+        SetWindowTextW(hLblPreset, L"Discovered WADs:");
+        SetWindowTextW(hLblPwad, L"Additional Mod / PWAD (-file):");
+        SetWindowTextW(hPwadBrowse, L"Browse...");
+
+        SetWindowTextW(hLblRes, L"Screen Resolution:");
+        SetWindowTextW(hChkKeepAspect, L"Preserve 16:10 Aspect Ratio (-keepaspect)");
+        SetWindowTextW(hChkFullscreen, L"Fullscreen Mode (-fullscreen)");
+        SetWindowTextW(hChkMaximized, L"Borderless Window (-maximized)");
+
+        SetWindowTextW(hChkBot, L"Enable AI Bot (-bot)");
+        SetWindowTextW(hChkMlook, L"Mouse Freelook (-mlook)");
+        SetWindowTextW(hChkMenuMouse, L"Mouse in Menus (-menumouse)");
+        SetWindowTextW(hChkFast, L"Fast Monsters (-fast)");
+        SetWindowTextW(hChkNoMonsters, L"No Monsters (-nomonsters)");
+        SetWindowTextW(hChkRespawn, L"Respawn Monsters (-respawn)");
+        SetWindowTextW(hChkJUMP, L"Enable Jump (Space) (-jump)");
+        SetWindowTextW(hChkQuickStart, L"Quick Start (skip title screen)");
+
+        SetWindowTextW(hLblSkill, L"Difficulty:");
+        SetWindowTextW(hLblWarp, L"Map (Warp):");
+        SetWindowTextW(hLblExtra, L"Extra Parameters:");
+        SetWindowTextW(hChkCloseStart, L"Close launcher when game starts");
+
+        SetWindowTextW(hBtnLaunch, L"►  LAUNCH ANTIDOOM");
+        SetWindowTextW(hBtnSave, L"Save Settings");
+        SetWindowTextW(hBtnExit, L"Exit");
+    }
+
+    // Refresh Skill Combobox preserving selection
+    int curSkill = (int)SendMessageW(hSkillCombo, CB_GETCURSEL, 0, 0);
+    SendMessageW(hSkillCombo, CB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < 5; i++) {
+        SendMessageW(hSkillCombo, CB_ADDSTRING, 0, (LPARAM)(current_lang == 0 ? skill_list_ru[i] : skill_list_en[i]));
+    }
+    SendMessageW(hSkillCombo, CB_SETCURSEL, (curSkill >= 0 && curSkill < 5) ? curSkill : 2, 0);
+
+    // Refresh Resolution Combobox preserving selection
+    int curRes = (int)SendMessageW(hResCombo, CB_GETCURSEL, 0, 0);
+    InitResolutions();
+    SendMessageW(hResCombo, CB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < res_count; i++) {
+        SendMessageW(hResCombo, CB_ADDSTRING, 0, (LPARAM)res_options[i].label);
+    }
+    SendMessageW(hResCombo, CB_SETCURSEL, (curRes >= 0 && curRes < res_count) ? curRes : 0, 0);
+
+    // Refresh WAD Preset Combobox
+    wchar_t curIwad[512] = {0};
+    GetWindowTextW(hIwadPath, curIwad, 512);
+    ScanWadFolder(curIwad);
+
+    if (hMainWnd) {
+        InvalidateRect(hMainWnd, NULL, TRUE);
     }
 }
 
 static void SaveSettings(void)
 {
     wchar_t buf[512];
+
+    WritePrivateProfileStringW(L"Launcher", L"Language", current_lang == 1 ? L"en" : L"ru", INI_FILE);
+
     GetWindowTextW(hIwadPath, buf, sizeof(buf)/sizeof(wchar_t));
     WritePrivateProfileStringW(L"Launcher", L"IWAD", buf, INI_FILE);
 
@@ -242,6 +422,9 @@ static void SaveSettings(void)
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkRespawn, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Respawn", buf, INI_FILE);
 
+    swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkJUMP, BM_GETCHECK, 0, 0));
+    WritePrivateProfileStringW(L"Launcher", L"Jump", buf, INI_FILE);
+
     sel = (int)SendMessageW(hSkillCombo, CB_GETCURSEL, 0, 0);
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", sel >= 0 ? sel : 2);
     WritePrivateProfileStringW(L"Launcher", L"Skill", buf, INI_FILE);
@@ -262,6 +445,14 @@ static void SaveSettings(void)
 static void LoadSettings(void)
 {
     wchar_t buf[512];
+
+    GetPrivateProfileStringW(L"Launcher", L"Language", L"ru", buf, sizeof(buf)/sizeof(wchar_t), INI_FILE);
+    if (_wcsicmp(buf, L"en") == 0) {
+        current_lang = 1;
+    } else {
+        current_lang = 0;
+    }
+
     GetPrivateProfileStringW(L"Launcher", L"IWAD", L"", buf, sizeof(buf)/sizeof(wchar_t), INI_FILE);
     if (buf[0] == L'\0') {
         if (GetFileAttributesW(L"wad\\DOOM2.WAD") != INVALID_FILE_ATTRIBUTES)
@@ -270,7 +461,6 @@ static void LoadSettings(void)
             wcscpy(buf, L"wad\\DOOM2.WAD");
     }
     SetWindowTextW(hIwadPath, buf);
-    ScanWadFolder(buf);
 
     GetPrivateProfileStringW(L"Launcher", L"PWAD", L"", buf, sizeof(buf)/sizeof(wchar_t), INI_FILE);
     SetWindowTextW(hPwadPath, buf);
@@ -298,6 +488,7 @@ static void LoadSettings(void)
     SendMessageW(hChkFast, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Fast", 0, INI_FILE), 0);
     SendMessageW(hChkNoMonsters, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"NoMonsters", 0, INI_FILE), 0);
     SendMessageW(hChkRespawn, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Respawn", 0, INI_FILE), 0);
+    SendMessageW(hChkJUMP, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Jump", 1, INI_FILE), 0);
 
     int skill = GetPrivateProfileIntW(L"Launcher", L"Skill", 2, INI_FILE);
     SendMessageW(hSkillCombo, CB_SETCURSEL, skill, 0);
@@ -311,6 +502,8 @@ static void LoadSettings(void)
     SetWindowTextW(hExtraEdit, buf);
 
     SendMessageW(hChkCloseStart, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"CloseOnStart", 1, INI_FILE), 0);
+
+    ApplyLanguage(current_lang);
 }
 
 static void BrowseFile(HWND hParent, HWND hTargetEdit, const wchar_t* title)
@@ -318,7 +511,6 @@ static void BrowseFile(HWND hParent, HWND hTargetEdit, const wchar_t* title)
     wchar_t launcherDir[MAX_PATH] = {0};
     GetLauncherDir(launcherDir, MAX_PATH);
 
-    // Modern Windows Vista/7/10/11 IFileOpenDialog with mandatory SetFolder
     IFileOpenDialog *pfd = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void**)&pfd);
     if (SUCCEEDED(hr) && pfd) {
@@ -326,7 +518,6 @@ static void BrowseFile(HWND hParent, HWND hTargetEdit, const wchar_t* title)
 
         IShellItem *psiFolder = NULL;
         if (SUCCEEDED(SHCreateItemFromParsingName(launcherDir, NULL, &IID_IShellItem, (void**)&psiFolder))) {
-            // SetFolder strictly forces the dialog to open in launcher directory!
             pfd->lpVtbl->SetFolder(pfd, psiFolder);
             pfd->lpVtbl->SetDefaultFolder(pfd, psiFolder);
             psiFolder->lpVtbl->Release(psiFolder);
@@ -334,7 +525,7 @@ static void BrowseFile(HWND hParent, HWND hTargetEdit, const wchar_t* title)
 
         COMDLG_FILTERSPEC rgSpec[] = {
             { L"DOOM WAD (*.wad)", L"*.wad" },
-            { L"Все файлы (*.*)", L"*.*" }
+            { (current_lang == 0 ? L"Все файлы (*.*)" : L"All Files (*.*)"), L"*.*" }
         };
         pfd->lpVtbl->SetFileTypes(pfd, 2, rgSpec);
 
@@ -371,7 +562,7 @@ static void BrowseFile(HWND hParent, HWND hTargetEdit, const wchar_t* title)
     memset(&ofn, 0, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hParent;
-    ofn.lpstrFilter = L"DOOM WAD (*.wad)\0*.wad\0Все файлы (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"DOOM WAD (*.wad)\0*.wad\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = fileBuf;
     ofn.nMaxFile = sizeof(fileBuf)/sizeof(wchar_t);
     ofn.lpstrTitle = title;
@@ -394,7 +585,16 @@ static void LaunchGame(HWND hWnd)
 {
     SaveSettings();
 
-    wchar_t cmd[2048] = L"doom2.exe";
+    // Prefer antidoom.exe, fallback to doom2.exe
+    const wchar_t *exeName = L"antidoom.exe";
+    if (GetFileAttributesW(L"antidoom.exe") == INVALID_FILE_ATTRIBUTES) {
+        if (GetFileAttributesW(L"doom2.exe") != INVALID_FILE_ATTRIBUTES) {
+            exeName = L"doom2.exe";
+        }
+    }
+
+    wchar_t cmd[2048];
+    swprintf(cmd, 2048, L"%ls", exeName);
     wchar_t buf[512];
 
     // IWAD
@@ -435,6 +635,13 @@ static void LaunchGame(HWND hWnd)
     if (SendMessageW(hChkNoMonsters, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomonsters");
     if (SendMessageW(hChkRespawn, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -respawn");
 
+    // Jumping
+    if (SendMessageW(hChkJUMP, BM_GETCHECK, 0, 0)) {
+        wcscat(cmd, L" -jump");
+    } else {
+        wcscat(cmd, L" -nojump");
+    }
+
     int skill = (int)SendMessageW(hSkillCombo, CB_GETCURSEL, 0, 0);
     if (skill >= 0 && skill < 5) {
         swprintf(buf, sizeof(buf)/sizeof(wchar_t), L" -skill %d", skill + 1);
@@ -448,7 +655,6 @@ static void LaunchGame(HWND hWnd)
         wcscat(cmd, L" -warp ");
         wcscat(cmd, buf);
     } else if (isQuickStart) {
-        // Quick start into map 1
         wcscat(cmd, L" -warp 1");
     }
 
@@ -466,8 +672,13 @@ static void LaunchGame(HWND hWnd)
 
     if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         wchar_t err[1024];
-        swprintf(err, sizeof(err)/sizeof(wchar_t), L"Не удалось запустить doom2.exe!\nКоманда:\n%ls", cmd);
-        MessageBoxW(hWnd, err, L"Ошибка запуска", MB_OK | MB_ICONERROR);
+        if (current_lang == 0) {
+            swprintf(err, sizeof(err)/sizeof(wchar_t), L"Не удалось запустить %ls!\nКоманда:\n%ls", exeName, cmd);
+            MessageBoxW(hWnd, err, L"Ошибка запуска", MB_OK | MB_ICONERROR);
+        } else {
+            swprintf(err, sizeof(err)/sizeof(wchar_t), L"Failed to launch %ls!\nCommand:\n%ls", exeName, cmd);
+            MessageBoxW(hWnd, err, L"Launch Error", MB_OK | MB_ICONERROR);
+        }
         return;
     }
 
@@ -514,22 +725,27 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     switch (msg) {
     case WM_CREATE: {
+        hMainWnd = hWnd;
+
+        // Header Language Toggle Button
+        hBtnLang = CreateWindowW(L"BUTTON", L"[ EN ]", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 455, 18, 80, 28, hWnd, (HMENU)IDC_BTN_LANG, NULL, NULL);
+
         // IWAD Section
-        CreateWindowW(L"STATIC", L"Файл игры (IWAD):", WS_CHILD | WS_VISIBLE, 25, 75, 200, 16, hWnd, NULL, NULL, NULL);
+        hLblIwad = CreateWindowW(L"STATIC", L"Файл игры (IWAD):", WS_CHILD | WS_VISIBLE, 25, 75, 200, 16, hWnd, (HMENU)IDC_LBL_IWAD, NULL, NULL);
         hIwadPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 95, 395, 26, hWnd, (HMENU)IDC_IWAD_PATH, NULL, NULL);
         hIwadBrowse = CreateWindowW(L"BUTTON", L"Обзор...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 430, 95, 105, 26, hWnd, (HMENU)IDC_IWAD_BROWSE, NULL, NULL);
 
-        CreateWindowW(L"STATIC", L"Обнаруженные WAD:", WS_CHILD | WS_VISIBLE, 25, 128, 140, 18, hWnd, NULL, NULL, NULL);
+        hLblPreset = CreateWindowW(L"STATIC", L"Обнаруженные WAD:", WS_CHILD | WS_VISIBLE, 25, 128, 140, 18, hWnd, (HMENU)IDC_LBL_PRESET, NULL, NULL);
         hIwadPreset = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 170, 125, 365, 200, hWnd, (HMENU)IDC_IWAD_PRESET, NULL, NULL);
 
         // PWAD Section
-        CreateWindowW(L"STATIC", L"Дополнительный мод / PWAD (-file):", WS_CHILD | WS_VISIBLE, 25, 159, 300, 16, hWnd, NULL, NULL, NULL);
+        hLblPwad = CreateWindowW(L"STATIC", L"Дополнительный мод / PWAD (-file):", WS_CHILD | WS_VISIBLE, 25, 159, 300, 16, hWnd, (HMENU)IDC_LBL_PWAD, NULL, NULL);
         hPwadPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 179, 395, 26, hWnd, (HMENU)IDC_PWAD_PATH, NULL, NULL);
         hPwadBrowse = CreateWindowW(L"BUTTON", L"Обзор...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 430, 179, 105, 26, hWnd, (HMENU)IDC_PWAD_BROWSE, NULL, NULL);
 
         // Resolution & Display Section
         InitResolutions();
-        CreateWindowW(L"STATIC", L"Разрешение экрана:", WS_CHILD | WS_VISIBLE, 25, 220, 140, 18, hWnd, NULL, NULL, NULL);
+        hLblRes = CreateWindowW(L"STATIC", L"Разрешение экрана:", WS_CHILD | WS_VISIBLE, 25, 220, 140, 18, hWnd, (HMENU)IDC_LBL_RES, NULL, NULL);
         hResCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 170, 217, 365, 200, hWnd, (HMENU)IDC_RES_COMBO, NULL, NULL);
         for (int i = 0; i < res_count; i++)
             SendMessageW(hResCombo, CB_ADDSTRING, 0, (LPARAM)res_options[i].label);
@@ -538,38 +754,38 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         hChkFullscreen = CreateWindowW(L"BUTTON", L"Полный экран (-fullscreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 275, 230, 20, hWnd, (HMENU)IDC_CHK_FULLSCREEN, NULL, NULL);
         hChkMaximized = CreateWindowW(L"BUTTON", L"Окно без рамок (-maximized)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 275, 260, 20, hWnd, (HMENU)IDC_CHK_MAXIMIZED, NULL, NULL);
 
-        // Gameplay / AI Section (2 Columns)
-        hChkBot = CreateWindowW(L"BUTTON", L"Включить бота (-bot)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 312, 230, 20, hWnd, (HMENU)IDC_CHK_BOT, NULL, NULL);
-        hChkMlook = CreateWindowW(L"BUTTON", L"Обзор мышью (-mlook)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 312, 260, 20, hWnd, (HMENU)IDC_CHK_MLOOK, NULL, NULL);
+        // Gameplay / AI Section
+        hChkBot = CreateWindowW(L"BUTTON", L"Включить бота (-bot)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 308, 230, 20, hWnd, (HMENU)IDC_CHK_BOT, NULL, NULL);
+        hChkMlook = CreateWindowW(L"BUTTON", L"Обзор мышью (-mlook)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 308, 260, 20, hWnd, (HMENU)IDC_CHK_MLOOK, NULL, NULL);
 
-        hChkMenuMouse = CreateWindowW(L"BUTTON", L"Курсор мыши в меню (-menumouse)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 337, 245, 20, hWnd, (HMENU)IDC_CHK_MENUMOUSE, NULL, NULL);
-        hChkFast = CreateWindowW(L"BUTTON", L"Быстрые монстры (-fast)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 337, 260, 20, hWnd, (HMENU)IDC_CHK_FAST, NULL, NULL);
+        hChkMenuMouse = CreateWindowW(L"BUTTON", L"Курсор мыши в меню (-menumouse)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 332, 245, 20, hWnd, (HMENU)IDC_CHK_MENUMOUSE, NULL, NULL);
+        hChkFast = CreateWindowW(L"BUTTON", L"Быстрые монстры (-fast)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 332, 260, 20, hWnd, (HMENU)IDC_CHK_FAST, NULL, NULL);
 
-        hChkNoMonsters = CreateWindowW(L"BUTTON", L"Без монстров (-nomonsters)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 362, 230, 20, hWnd, (HMENU)IDC_CHK_NOMONSTERS, NULL, NULL);
-        hChkRespawn = CreateWindowW(L"BUTTON", L"Возрождение монстров (-respawn)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 362, 260, 20, hWnd, (HMENU)IDC_CHK_RESPAWN, NULL, NULL);
+        hChkNoMonsters = CreateWindowW(L"BUTTON", L"Без монстров (-nomonsters)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 356, 230, 20, hWnd, (HMENU)IDC_CHK_NOMONSTERS, NULL, NULL);
+        hChkRespawn = CreateWindowW(L"BUTTON", L"Возрождение монстров (-respawn)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 356, 260, 20, hWnd, (HMENU)IDC_CHK_RESPAWN, NULL, NULL);
+
+        hChkJUMP = CreateWindowW(L"BUTTON", L"Прыжок (Space) (-jump)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 380, 230, 20, hWnd, (HMENU)IDC_CHK_JUMP, NULL, NULL);
+        hChkQuickStart = CreateWindowW(L"BUTTON", L"Сразу в игру (минуя заставку)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 380, 260, 20, hWnd, (HMENU)IDC_CHK_QUICKSTART, NULL, NULL);
 
         // Difficulty & Warp
-        CreateWindowW(L"STATIC", L"Сложность:", WS_CHILD | WS_VISIBLE, 25, 398, 80, 18, hWnd, NULL, NULL, NULL);
-        hSkillCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 110, 395, 245, 180, hWnd, (HMENU)IDC_SKILL_COMBO, NULL, NULL);
-        for (int i = 0; i < (int)(sizeof(skill_list)/sizeof(skill_list[0])); i++)
-            SendMessageW(hSkillCombo, CB_ADDSTRING, 0, (LPARAM)skill_list[i]);
+        hLblSkill = CreateWindowW(L"STATIC", L"Сложность:", WS_CHILD | WS_VISIBLE, 25, 412, 80, 18, hWnd, (HMENU)IDC_LBL_SKILL, NULL, NULL);
+        hSkillCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 110, 409, 245, 180, hWnd, (HMENU)IDC_SKILL_COMBO, NULL, NULL);
+        for (int i = 0; i < 5; i++)
+            SendMessageW(hSkillCombo, CB_ADDSTRING, 0, (LPARAM)skill_list_ru[i]);
 
-        CreateWindowW(L"STATIC", L"Карта (Warp):", WS_CHILD | WS_VISIBLE, 370, 398, 95, 18, hWnd, NULL, NULL, NULL);
-        hWarpEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 470, 395, 65, 24, hWnd, (HMENU)IDC_WARP_EDIT, NULL, NULL);
-
-        // Optional Quick Start vs Intro Title
-        hChkQuickStart = CreateWindowW(L"BUTTON", L"Сразу в игру (минуя заставку)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 426, 320, 20, hWnd, (HMENU)IDC_CHK_QUICKSTART, NULL, NULL);
+        hLblWarp = CreateWindowW(L"STATIC", L"Карта (Warp):", WS_CHILD | WS_VISIBLE, 370, 412, 95, 18, hWnd, (HMENU)IDC_LBL_WARP, NULL, NULL);
+        hWarpEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 470, 409, 65, 24, hWnd, (HMENU)IDC_WARP_EDIT, NULL, NULL);
 
         // Extra args
-        CreateWindowW(L"STATIC", L"Дополнительные параметры:", WS_CHILD | WS_VISIBLE, 25, 452, 250, 18, hWnd, NULL, NULL, NULL);
-        hExtraEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 472, 510, 24, hWnd, (HMENU)IDC_EXTRA_EDIT, NULL, NULL);
+        hLblExtra = CreateWindowW(L"STATIC", L"Дополнительные параметры:", WS_CHILD | WS_VISIBLE, 25, 442, 250, 18, hWnd, (HMENU)IDC_LBL_EXTRA, NULL, NULL);
+        hExtraEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 462, 510, 24, hWnd, (HMENU)IDC_EXTRA_EDIT, NULL, NULL);
 
-        hChkCloseStart = CreateWindowW(L"BUTTON", L"Закрывать ланчер при запуске игры", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 504, 350, 20, hWnd, (HMENU)IDC_CHK_CLOSE_START, NULL, NULL);
+        hChkCloseStart = CreateWindowW(L"BUTTON", L"Закрывать ланчер при запуске игры", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 494, 350, 20, hWnd, (HMENU)IDC_CHK_CLOSE_START, NULL, NULL);
 
         // Buttons
-        hBtnLaunch = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 532, 510, 46, hWnd, (HMENU)IDC_BTN_LAUNCH, NULL, NULL);
-        hBtnSave = CreateWindowW(L"BUTTON", L"Сохранить настройки", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 586, 245, 30, hWnd, (HMENU)IDC_BTN_SAVE, NULL, NULL);
-        hBtnExit = CreateWindowW(L"BUTTON", L"Выход", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 290, 586, 245, 30, hWnd, (HMENU)IDC_BTN_EXIT, NULL, NULL);
+        hBtnLaunch = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 522, 510, 46, hWnd, (HMENU)IDC_BTN_LAUNCH, NULL, NULL);
+        hBtnSave = CreateWindowW(L"BUTTON", L"Сохранить настройки", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 576, 245, 30, hWnd, (HMENU)IDC_BTN_SAVE, NULL, NULL);
+        hBtnExit = CreateWindowW(L"BUTTON", L"Выход", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 290, 576, 245, 30, hWnd, (HMENU)IDC_BTN_EXIT, NULL, NULL);
 
         EnumChildWindows(hWnd, SetFontCallback, 0);
 
@@ -581,24 +797,32 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
-        if (id == IDC_IWAD_PRESET && code == CBN_SELCHANGE) {
+        if (id == IDC_BTN_LANG) {
+            current_lang = 1 - current_lang;
+            ApplyLanguage(current_lang);
+            SaveSettings();
+        }
+        else if (id == IDC_IWAD_PRESET && code == CBN_SELCHANGE) {
             int sel = (int)SendMessageW(hIwadPreset, CB_GETCURSEL, 0, 0);
             if (sel >= 0 && sel < found_wad_count) {
                 SetWindowTextW(hIwadPath, found_wads[sel].path);
             }
         }
         else if (id == IDC_IWAD_BROWSE) {
-            BrowseFile(hWnd, hIwadPath, L"Выберите файл игры (IWAD)");
+            BrowseFile(hWnd, hIwadPath, current_lang == 0 ? L"Выберите файл игры (IWAD)" : L"Select Game IWAD File");
         }
         else if (id == IDC_PWAD_BROWSE) {
-            BrowseFile(hWnd, hPwadPath, L"Выберите файл мода (PWAD)");
+            BrowseFile(hWnd, hPwadPath, current_lang == 0 ? L"Выберите файл мода (PWAD)" : L"Select Mod PWAD File");
         }
         else if (id == IDC_BTN_LAUNCH) {
             LaunchGame(hWnd);
         }
         else if (id == IDC_BTN_SAVE) {
             SaveSettings();
-            MessageBoxW(hWnd, L"Настройки успешно сохранены в launcher.ini!", L"Сохранено", MB_OK | MB_ICONINFORMATION);
+            if (current_lang == 0)
+                MessageBoxW(hWnd, L"Настройки успешно сохранены в launcher.ini!", L"Сохранено", MB_OK | MB_ICONINFORMATION);
+            else
+                MessageBoxW(hWnd, L"Settings saved successfully to launcher.ini!", L"Saved", MB_OK | MB_ICONINFORMATION);
         }
         else if (id == IDC_BTN_EXIT) {
             PostQuitMessage(0);
@@ -646,21 +870,30 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             RECT r = dis->rcItem;
             if (isDown) { r.top += 1; r.left += 1; }
-            DrawTextW(dis->hDC, L"►  ЗАПУСТИТЬ DOOM", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            const wchar_t *launchText = (current_lang == 0) ? L"►  ЗАПУСТИТЬ ANTIDOOM" : L"►  LAUNCH ANTIDOOM";
+            DrawTextW(dis->hDC, launchText, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
             SelectObject(dis->hDC, hOldFont);
             return TRUE;
         }
+        else if (dis->CtlID == IDC_BTN_LANG) {
+            const wchar_t *langText = (current_lang == 0) ? L"EN" : L"RU";
+            DrawDarkButton(dis, langText, hFontBtn, RGB(55, 45, 80), RGB(35, 28, 55), colGold, colGold);
+            return TRUE;
+        }
         else if (dis->CtlID == IDC_BTN_SAVE) {
-            DrawDarkButton(dis, L"Сохранить настройки", hFontBtn, RGB(44, 48, 58), RGB(30, 33, 40), RGB(75, 82, 98), RGB(235, 238, 245));
+            const wchar_t *saveText = (current_lang == 0) ? L"Сохранить настройки" : L"Save Settings";
+            DrawDarkButton(dis, saveText, hFontBtn, RGB(44, 48, 58), RGB(30, 33, 40), RGB(75, 82, 98), RGB(235, 238, 245));
             return TRUE;
         }
         else if (dis->CtlID == IDC_BTN_EXIT) {
-            DrawDarkButton(dis, L"Выход", hFontBtn, RGB(44, 48, 58), RGB(30, 33, 40), RGB(75, 82, 98), RGB(235, 238, 245));
+            const wchar_t *exitText = (current_lang == 0) ? L"Выход" : L"Exit";
+            DrawDarkButton(dis, exitText, hFontBtn, RGB(44, 48, 58), RGB(30, 33, 40), RGB(75, 82, 98), RGB(235, 238, 245));
             return TRUE;
         }
         else if (dis->CtlID == IDC_IWAD_BROWSE || dis->CtlID == IDC_PWAD_BROWSE) {
-            DrawDarkButton(dis, L"Обзор...", hFontBtn, RGB(46, 50, 60), RGB(32, 35, 42), RGB(80, 88, 104), RGB(235, 238, 245));
+            const wchar_t *brText = (current_lang == 0) ? L"Обзор..." : L"Browse...";
+            DrawDarkButton(dis, brText, hFontBtn, RGB(46, 50, 60), RGB(32, 35, 42), RGB(80, 88, 104), RGB(235, 238, 245));
             return TRUE;
         }
         break;
@@ -688,11 +921,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, colGold);
         HFONT hOld = (HFONT)SelectObject(hdc, hFontTitle);
-        TextOutW(hdc, 25, 10, L"DOOM : Win32 Launcher", 22);
+        TextOutW(hdc, 25, 10, L"AntiDoom : Win32 Launcher", 26);
 
         SetTextColor(hdc, colGray);
         SelectObject(hdc, hFontSub);
-        TextOutW(hdc, 26, 38, L"Управление параметрами запуска, модами и ботом", 46);
+        if (current_lang == 0) {
+            TextOutW(hdc, 26, 38, L"Управление параметрами запуска, модами и ботом", 46);
+        } else {
+            TextOutW(hdc, 26, 38, L"Game launch settings, PWAD mods, and bot control", 48);
+        }
 
         SelectObject(hdc, hOld);
         EndPaint(hWnd, &ps);
@@ -730,7 +967,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"DoomLauncher";
+    wc.lpszClassName = L"AntiDoomLauncher";
     wc.hbrBackground = hBrushBg;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
@@ -740,7 +977,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    RECT rc = {0, 0, 560, 635};
+    RECT rc = {0, 0, 560, 625};
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 
     int scrW = GetSystemMetrics(SM_CXSCREEN);
@@ -750,7 +987,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     int posX = (scrW - winW) / 2;
     int posY = (scrH - winH) / 2;
 
-    HWND hWnd = CreateWindowW(L"DoomLauncher", L"DOOM - Win32 Launcher",
+    HWND hWnd = CreateWindowW(L"AntiDoomLauncher", L"AntiDoom - Win32 Launcher",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
         posX, posY, winW, winH, NULL, NULL, hInstance, NULL);
 

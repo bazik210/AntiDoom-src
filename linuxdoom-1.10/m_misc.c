@@ -188,6 +188,8 @@ extern int	key_strafeleft2;
 extern int	key_straferight2;
 extern int	key_fire2;
 extern int	key_use2;
+extern int	allow_jump;
+extern int	key_jump;
 extern int	novert;
 extern int	mlook;
 extern int	menu_mouse;
@@ -289,6 +291,8 @@ default_t	defaults[] =
     {"novert",&novert, 1},
     {"mlook",&mlook, 1},
     {"menu_mouse",&menu_mouse, 1},
+    {"allow_jump",&allow_jump, 0},
+    {"key_jump",&key_jump, ' '},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},
@@ -433,6 +437,15 @@ void M_LoadDefaults (void)
     if (M_CheckParm("-mlook")) mlook = 1;
     if (M_CheckParm("-nomenumouse")) menu_mouse = 0;
     if (M_CheckParm("-menumouse")) menu_mouse = 1;
+    if (M_CheckParm("-jump")) allow_jump = 1;
+    if (M_CheckParm("-nojump")) allow_jump = 0;
+    i = M_CheckParm("-keyjump");
+    if (i && i < myargc - 1)
+    {
+        key_jump = atoi(myargv[i+1]);
+        if (key_jump == 0 && myargv[i+1][0])
+            key_jump = (unsigned char)myargv[i+1][0];
+    }
 }
 
 

@@ -87,6 +87,9 @@ typedef enum
     BT_WEAPONMASK	= (8+16+32),
     BT_WEAPONSHIFT	= 3,
 
+    // Jump button (AntiDoom)
+    BT_JUMP		= 64,
+
     // Pause the game.
     BTS_PAUSE		= 1,
     // Save the game at each console.

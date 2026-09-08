@@ -166,6 +166,8 @@ int		key_fire2 = 0;
 int		key_use2 = 'e';
 int		novert = 1;
 int		mlook = 1;
+int		allow_jump = 0;
+int		key_jump = ' ';
 int		lookdir = 0;
 boolean	level_weapon_ready = false;
 boolean		prev_weapon_ready = false;
@@ -351,7 +353,21 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	|| joybuttons[joybfire]) 
 	cmd->buttons |= BT_ATTACK; 
  
-    if (gamekeydown[key_use] || (key_use2 && gamekeydown[key_use2]) || joybuttons[joybuse] ) 
+    if (allow_jump && key_jump && gamekeydown[key_jump])
+	cmd->buttons |= BT_JUMP;
+
+    boolean use_hit = false;
+    if (gamekeydown[key_use])
+    {
+	if (!allow_jump || key_jump != key_use)
+	    use_hit = true;
+    }
+    if (key_use2 && gamekeydown[key_use2])
+	use_hit = true;
+    if (joybuttons[joybuse])
+	use_hit = true;
+
+    if (use_hit) 
     { 
 	cmd->buttons |= BT_USE;
 	// clear double clicks if hit use button 

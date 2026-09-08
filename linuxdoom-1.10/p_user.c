@@ -34,6 +34,8 @@ rcsid[] = "$Id: p_user.c,v 1.3 1997/01/28 22:08:29 b1 Exp $";
 #include "p_local.h"
 
 #include "doomstat.h"
+#include "s_sound.h"
+#include "sounds.h"
 
 
 
@@ -157,11 +159,11 @@ void P_MovePlayer (player_t* player)
     //  if not onground.
     onground = (player->mo->z <= player->mo->floorz);
 	
-    if (cmd->forwardmove && onground)
-	P_Thrust (player, player->mo->angle, cmd->forwardmove*2048);
+    if (cmd->forwardmove)
+	P_Thrust (player, player->mo->angle, onground ? (cmd->forwardmove*2048) : (cmd->forwardmove*512));
     
-    if (cmd->sidemove && onground)
-	P_Thrust (player, player->mo->angle-ANG90, cmd->sidemove*2048);
+    if (cmd->sidemove)
+	P_Thrust (player, player->mo->angle-ANG90, onground ? (cmd->sidemove*2048) : (cmd->sidemove*512));
 
     if ( (cmd->forwardmove || cmd->sidemove) 
 	 && player->mo->state == &states[S_PLAY] )
@@ -346,6 +348,25 @@ void P_PlayerThink (player_t* player)
     }
     else
 	player->usedown = false;
+
+    // check for jump (AntiDoom)
+    {
+	extern int allow_jump;
+	static boolean jumpdown[MAXPLAYERS] = {false};
+	int pnum = player - players;
+	if (allow_jump && (cmd->buttons & BT_JUMP))
+	{
+	    if (pnum >= 0 && pnum < MAXPLAYERS && !jumpdown[pnum] && onground && player->mo->z <= player->mo->floorz)
+	    {
+		player->mo->momz = 9 * FRACUNIT;
+		jumpdown[pnum] = true;
+	    }
+	}
+	else if (pnum >= 0 && pnum < MAXPLAYERS)
+	{
+	    jumpdown[pnum] = false;
+	}
+    }
     
     // cycle psprites
     P_MovePsprites (player);

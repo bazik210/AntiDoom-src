@@ -281,6 +281,9 @@ typedef enum
 
 #define KEY_LALT	KEY_RALT
 
+extern int allow_jump;
+extern int key_jump;
+
 
 
 // DOOM basic types (boolean),
