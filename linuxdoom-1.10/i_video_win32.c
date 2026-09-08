@@ -83,6 +83,7 @@ void I_InitGraphics(void)
     RECT r, work;
     MONITORINFO mi;
     int p, w = 960, h = 600;
+    boolean maximize = false;
     char *s;
 
     p = M_CheckParm("-res");
@@ -105,6 +106,8 @@ void I_InitGraphics(void)
     GetMonitorInfo(MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY), &mi);
     if (fullscreen) { w = mi.rcMonitor.right - mi.rcMonitor.left; h = mi.rcMonitor.bottom - mi.rcMonitor.top; }
     else {
+        if (M_CheckParm("-maximized") || (r.right-r.left >= work.right-work.left) || (r.bottom-r.top >= work.bottom-work.top))
+            maximize = true;
         if (r.right-r.left > work.right-work.left) r.right = r.left + work.right-work.left;
         if (r.bottom-r.top > work.bottom-work.top) r.bottom = r.top + work.bottom-work.top;
     }
@@ -122,7 +125,7 @@ void I_InitGraphics(void)
     bmi.bmiHeader.biCompression = BI_RGB;
     rgb = (unsigned int*)malloc(SCREENWIDTH * SCREENHEIGHT * sizeof(unsigned int));
     screens[0] = (byte*)malloc(SCREENWIDTH * SCREENHEIGHT);
-    ShowWindow(win, SW_SHOW); UpdateWindow(win);
+    ShowWindow(win, maximize ? SW_MAXIMIZE : SW_SHOW); UpdateWindow(win);
     s = getenv("DOOM_WIN32_RES"); (void)s;
 }
 
