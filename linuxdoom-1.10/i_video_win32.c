@@ -212,6 +212,7 @@ void I_InitGraphics(void)
     screens[0] = (byte*)malloc(SCREENWIDTH * SCREENHEIGHT);
     ShowWindow(win, maximize ? SW_MAXIMIZE : SW_SHOW); UpdateWindow(win);
     I_UpdateMouseCapture();
+    I_Log("Video: %dx%d (%s), Internal Canvas: %dx%d\n", window_width, window_height, fullscreen ? "fullscreen" : "windowed", SCREENWIDTH, SCREENHEIGHT);
     s = getenv("DOOM_WIN32_RES"); (void)s;
 }
 

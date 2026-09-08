@@ -43,7 +43,8 @@ void I_InitSound(void)
     for (i=1;i<NUMSFX;i++) { lump=sound_lump(&S_sfx[i]); size=W_LumpLength(lump); raw=(byte*)W_CacheLumpNum(lump,PU_STATIC); if(size>8){S_sfx[i].data=malloc(size-8);memcpy(S_sfx[i].data,raw+8,size-8);} }
     for (i=1;i<NUMSFX;i++) if (S_sfx[i].link) S_sfx[i].data = S_sfx[i].link->data;
     I_InitMusic();
-    fprintf(stderr,"Sound: Windows waveOut initialized\n");
+    I_Log("Sound: Windows waveOut initialized (11025 Hz 8-bit mono)\n");
+    I_Log("Music: Windows MCI MIDI Sequencer ready\n");
 }
 void I_ShutdownSound(void) { int i; if(wave){waveOutReset(wave);waveOutClose(wave);wave=NULL;} for(i=0;i<NUMSFX;i++){if(!S_sfx[i].link)free(S_sfx[i].data);S_sfx[i].data=NULL;} }
 void I_UpdateSound(void)

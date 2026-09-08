@@ -32,6 +32,8 @@
 
 
 // Called by DoomMain.
+void I_InitLog (void);
+void I_Log (const char *fmt, ...);
 void I_Init (void);
 
 // Called by startup code

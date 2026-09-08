@@ -77,6 +77,8 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 
 #include "d_main.h"
 
+#define printf I_Log
+
 //
 // D-DoomLoop()
 // Not a globally visible function,
@@ -577,7 +579,12 @@ void IdentifyVersion (void)
     char *doomwaddir;
     doomwaddir = getenv("DOOMWADDIR");
     if (!doomwaddir)
-	doomwaddir = ".";
+    {
+        if (access("game/doom2.wad", 0) == 0 || access("game/doom.wad", 0) == 0)
+            doomwaddir = "game";
+        else
+            doomwaddir = ".";
+    }
 
     // Commercial.
     doom2wad = malloc(strlen(doomwaddir)+1+9+1);
@@ -609,9 +616,10 @@ void IdentifyVersion (void)
     sprintf(doom2fwad, "%s/doom2f.wad", doomwaddir);
 
     home = getenv("HOME");
-    if (!home)
-      I_Error("Please set $HOME to your home directory");
-    sprintf(basedefault, "%s/.doomrc", home);
+    if (home)
+        sprintf(basedefault, "%s/.doomrc", home);
+    else
+        strcpy(basedefault, "default.cfg");
 #endif
 
     if (M_CheckParm ("-shdev"))
@@ -797,6 +805,11 @@ void D_DoomMain (void)
 {
     int             p;
     char                    file[256];
+
+    I_InitLog ();
+    I_Log("Command line: ");
+    for (p = 0; p < myargc; p++) I_Log("%s ", myargv[p]);
+    I_Log("\n\n");
 
     FindResponseFile ();
 	
@@ -1019,6 +1032,9 @@ void D_DoomMain (void)
 
     printf ("W_Init: Init WADfiles.\n");
     W_InitMultipleFiles (wadfiles);
+    for (p = 0; wadfiles[p]; p++) ;
+    I_Log("Loaded %d WAD file(s):\n", p);
+    for (p = 0; wadfiles[p]; p++) I_Log("  [%d] %s\n", p + 1, wadfiles[p]);
     
 
     // Check for -file in shareware
@@ -1105,6 +1121,7 @@ void D_DoomMain (void)
 
     printf ("S_Init: Setting up sound.\n");
     S_Init (snd_SfxVolume /* *8 */, snd_MusicVolume /* *8*/ );
+    I_Log("Audio initialized: SFX Volume=%d/15, Music Volume=%d/15\n", snd_SfxVolume, snd_MusicVolume);
 
     printf ("HU_Init: Setting up heads up display.\n");
     HU_Init ();
@@ -1167,5 +1184,6 @@ void D_DoomMain (void)
 
     }
 
+    I_Log("\nDOOM II Win32 initialized successfully. Entering main loop.\n\n");
     D_DoomLoop ();  // never returns
 }
