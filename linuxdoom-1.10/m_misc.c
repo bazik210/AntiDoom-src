@@ -182,6 +182,13 @@ extern int	key_fire;
 extern int	key_use;
 extern int	key_strafe;
 extern int	key_speed;
+extern int	key_up2;
+extern int	key_down2;
+extern int	key_strafeleft2;
+extern int	key_straferight2;
+extern int	key_fire2;
+extern int	key_use2;
+extern int	novert;
 
 extern int	mousebfire;
 extern int	mousebstrafe;
@@ -271,6 +278,13 @@ default_t	defaults[] =
     {"mouseb_fire",&mousebfire,0},
     {"mouseb_strafe",&mousebstrafe,1},
     {"mouseb_forward",&mousebforward,2},
+    {"key_up2",&key_up2, 'w'},
+    {"key_down2",&key_down2, 's'},
+    {"key_strafeleft2",&key_strafeleft2, 'a'},
+    {"key_straferight2",&key_straferight2, 'd'},
+    {"key_fire2",&key_fire2, 0},
+    {"key_use2",&key_use2, 'e'},
+    {"novert",&novert, 1},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},

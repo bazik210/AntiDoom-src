@@ -156,6 +156,13 @@ int             key_fire;
 int		key_use;
 int		key_strafe;
 int		key_speed; 
+int		key_up2 = 'w';
+int		key_down2 = 's';
+int		key_strafeleft2 = 'a';
+int		key_straferight2 = 'd';
+int		key_fire2 = 0;
+int		key_use2 = 'e';
+int		novert = 1;
  
 int             mousebfire; 
 int             mousebstrafe; 
@@ -305,12 +312,12 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	    cmd->angleturn += angleturn[tspeed]; 
     } 
  
-    if (gamekeydown[key_up]) 
+    if (gamekeydown[key_up] || (key_up2 && gamekeydown[key_up2])) 
     {
 	// fprintf(stderr, "up\n");
 	forward += forwardmove[speed]; 
     }
-    if (gamekeydown[key_down]) 
+    if (gamekeydown[key_down] || (key_down2 && gamekeydown[key_down2])) 
     {
 	// fprintf(stderr, "down\n");
 	forward -= forwardmove[speed]; 
@@ -319,19 +326,19 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	forward += forwardmove[speed]; 
     if (joyymove > 0) 
 	forward -= forwardmove[speed]; 
-    if (gamekeydown[key_straferight]) 
+    if (gamekeydown[key_straferight] || (key_straferight2 && gamekeydown[key_straferight2])) 
 	side += sidemove[speed]; 
-    if (gamekeydown[key_strafeleft]) 
+    if (gamekeydown[key_strafeleft] || (key_strafeleft2 && gamekeydown[key_strafeleft2])) 
 	side -= sidemove[speed];
     
     // buttons
     cmd->chatchar = HU_dequeueChatChar(); 
  
-    if (gamekeydown[key_fire] || mousebuttons[mousebfire] 
+    if (gamekeydown[key_fire] || (key_fire2 && gamekeydown[key_fire2]) || mousebuttons[mousebfire] 
 	|| joybuttons[joybfire]) 
 	cmd->buttons |= BT_ATTACK; 
  
-    if (gamekeydown[key_use] || joybuttons[joybuse] ) 
+    if (gamekeydown[key_use] || (key_use2 && gamekeydown[key_use2]) || joybuttons[joybuse] ) 
     { 
 	cmd->buttons |= BT_USE;
 	// clear double clicks if hit use button 
@@ -577,7 +584,7 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[1] = ev->data1 & 2; 
 	mousebuttons[2] = ev->data1 & 4; 
 	mousex = ev->data2*(mouseSensitivity+5)/10; 
-	mousey = ev->data3*(mouseSensitivity+5)/10; 
+	mousey = novert ? 0 : ev->data3*(mouseSensitivity+5)/10; 
 	return true;    // eat events 
  
       case ev_joystick: 

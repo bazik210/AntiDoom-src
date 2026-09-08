@@ -21,6 +21,35 @@ static int window_width = 960;
 static int window_height = 600;
 static boolean closing;
 static boolean fullscreen;
+static int mouse_buttons;
+static boolean mouse_captured;
+
+static void I_CaptureMouse(boolean capture)
+{
+    if (capture == mouse_captured)
+        return;
+    mouse_captured = capture;
+    if (capture) {
+        while (ShowCursor(FALSE) >= 0);
+        RECT rc;
+        GetClientRect(win, &rc);
+        POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        ClientToScreen(win, &pt);
+        SetCursorPos(pt.x, pt.y);
+        MapWindowPoints(win, NULL, (POINT*)&rc, 2);
+        ClipCursor(&rc);
+    } else {
+        ClipCursor(NULL);
+        while (ShowCursor(TRUE) < 0);
+    }
+}
+
+static void I_UpdateMouseCapture(void)
+{
+    HWND active = GetActiveWindow();
+    boolean want_capture = (active == win && GetForegroundWindow() == win) && (fullscreen || !menuactive);
+    I_CaptureMouse(want_capture);
+}
 
 static int win_key(WPARAM key)
 {
@@ -54,12 +83,60 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
     event_t ev;
     switch (msg) {
+    case WM_INPUT: {
+        RAWINPUT raw;
+        UINT dwSize = sizeof(RAWINPUT);
+        if (GetRawInputData((HRAWINPUT)l, RID_INPUT, &raw, &dwSize, sizeof(RAWINPUTHEADER)) != (UINT)-1) {
+            if (raw.header.dwType == RIM_TYPEMOUSE && mouse_captured) {
+                int dx = raw.data.mouse.lLastX;
+                int dy = raw.data.mouse.lLastY;
+                if (dx != 0 || dy != 0) {
+                    ev.type = ev_mouse;
+                    ev.data1 = mouse_buttons;
+                    ev.data2 = dx << 2;
+                    ev.data3 = -dy << 2;
+                    D_PostEvent(&ev);
+
+                    RECT rc;
+                    GetClientRect(win, &rc);
+                    POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+                    ClientToScreen(win, &pt);
+                    SetCursorPos(pt.x, pt.y);
+                }
+            }
+        }
+        return DefWindowProc(h, msg, w, l);
+    }
+    case WM_LBUTTONDOWN:
+        mouse_buttons |= 1;
+        if (!mouse_captured && (fullscreen || !menuactive)) I_CaptureMouse(true);
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_LBUTTONUP:
+        mouse_buttons &= ~1;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_RBUTTONDOWN:
+        mouse_buttons |= 2;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_RBUTTONUP:
+        mouse_buttons &= ~2;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_MBUTTONDOWN:
+        mouse_buttons |= 4;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_MBUTTONUP:
+        mouse_buttons &= ~4;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_SETFOCUS:
+        I_UpdateMouseCapture();
+        return 0;
     case WM_KEYDOWN:
         if (!(l & (1L << 30))) { ev.type = ev_keydown; ev.data1 = win_key(w); D_PostEvent(&ev); }
         return 0;
     case WM_KEYUP:
         ev.type = ev_keyup; ev.data1 = win_key(w); D_PostEvent(&ev); return 0;
     case WM_KILLFOCUS:
+        I_CaptureMouse(false);
+        mouse_buttons = 0;
         ev.type = ev_keyup;
         ev.data1 = KEY_RCTRL; D_PostEvent(&ev);
         ev.data1 = KEY_RSHIFT; D_PostEvent(&ev);
@@ -99,6 +176,14 @@ void I_InitGraphics(void)
     wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.lpszClassName = "DoomWin32";
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClass(&wc);
+
+    RAWINPUTDEVICE rid;
+    rid.usUsagePage = 0x01;
+    rid.usUsage = 0x02;
+    rid.dwFlags = 0;
+    rid.hwndTarget = NULL;
+    RegisterRawInputDevices(&rid, 1, sizeof(rid));
+
     r.left = 0; r.top = 0; r.right = w; r.bottom = h;
     if (!fullscreen) AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
@@ -126,11 +211,13 @@ void I_InitGraphics(void)
     rgb = (unsigned int*)malloc(SCREENWIDTH * SCREENHEIGHT * sizeof(unsigned int));
     screens[0] = (byte*)malloc(SCREENWIDTH * SCREENHEIGHT);
     ShowWindow(win, maximize ? SW_MAXIMIZE : SW_SHOW); UpdateWindow(win);
+    I_UpdateMouseCapture();
     s = getenv("DOOM_WIN32_RES"); (void)s;
 }
 
 void I_ShutdownGraphics(void)
 {
+    I_CaptureMouse(false);
     if (dc) ReleaseDC(win, dc); dc = NULL;
     if (win) DestroyWindow(win); win = NULL;
     free(rgb); rgb = NULL; free(screens[0]); screens[0] = NULL;
@@ -141,6 +228,7 @@ void I_UpdateNoBlit(void) { }
 
 void I_StartTic(void)
 {
+    I_UpdateMouseCapture();
     MSG msg;
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) closing = true;
