@@ -574,6 +574,12 @@ boolean G_Responder (event_t* ev)
 	if (F_Responder (ev)) 
 	    return true;	// finale ate the event 
     } 
+
+    if (gamestate == GS_INTERMISSION) 
+    { 
+	if (WI_Responder (ev)) 
+	    return true;	// intermission ate the event 
+    } 
 	 
     switch (ev->type) 
     { 

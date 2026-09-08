@@ -45,6 +45,7 @@ void WI_Drawer (void);
 
 // Setup for an intermission screen.
 void WI_Start(wbstartstruct_t*	 wbstartstruct);
+boolean WI_Responder(event_t* ev);
 
 #endif
 //-----------------------------------------------------------------------------

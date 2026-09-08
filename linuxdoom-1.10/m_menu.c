@@ -77,6 +77,7 @@ int			mouseSensitivity;       // has default
 
 // Show messages has default, 0 = off, 1 = on
 int			showMessages;
+int			menu_mouse = 0;
 	
 
 // Blocky mode, has default, 0 = high, 1 = normal
@@ -1358,6 +1359,13 @@ boolean M_Responder (event_t* ev)
     static  int     lastx = 0;
 	
     ch = -1;
+
+    // If menu is closed and no modal message is active, mouse and joystick belong to gameplay
+    if (!menuactive && !messageToPrint)
+    {
+        if (ev->type == ev_mouse || ev->type == ev_joystick)
+            return false;
+    }
 	
     if (ev->type == ev_joystick && joywait < I_GetTime())
     {
@@ -1398,44 +1406,50 @@ boolean M_Responder (event_t* ev)
     {
 	if (ev->type == ev_mouse && mousewait < I_GetTime())
 	{
-	    mousey += ev->data3;
-	    if (mousey < lasty-30)
+	    if (menu_mouse == 1)
 	    {
-		ch = KEY_DOWNARROW;
-		mousewait = I_GetTime() + 5;
-		mousey = lasty -= 30;
-	    }
-	    else if (mousey > lasty+30)
-	    {
-		ch = KEY_UPARROW;
-		mousewait = I_GetTime() + 5;
-		mousey = lasty += 30;
+		mousey += ev->data3;
+		if (mousey < lasty-30)
+		{
+		    ch = KEY_DOWNARROW;
+		    mousewait = I_GetTime() + 5;
+		    mousey = lasty -= 30;
+		}
+		else if (mousey > lasty+30)
+		{
+		    ch = KEY_UPARROW;
+		    mousewait = I_GetTime() + 5;
+		    mousey = lasty += 30;
+		}
+		
+		mousex += ev->data2;
+		if (mousex < lastx-30)
+		{
+		    ch = KEY_LEFTARROW;
+		    mousewait = I_GetTime() + 5;
+		    mousex = lastx -= 30;
+		}
+		else if (mousex > lastx+30)
+		{
+		    ch = KEY_RIGHTARROW;
+		    mousewait = I_GetTime() + 5;
+		    mousex = lastx += 30;
+		}
 	    }
 		
-	    mousex += ev->data2;
-	    if (mousex < lastx-30)
+	    if (menu_mouse >= 0)
 	    {
-		ch = KEY_LEFTARROW;
-		mousewait = I_GetTime() + 5;
-		mousex = lastx -= 30;
-	    }
-	    else if (mousex > lastx+30)
-	    {
-		ch = KEY_RIGHTARROW;
-		mousewait = I_GetTime() + 5;
-		mousex = lastx += 30;
-	    }
-		
-	    if (ev->data1&1)
-	    {
-		ch = KEY_ENTER;
-		mousewait = I_GetTime() + 15;
-	    }
+		if (ev->data1&1)
+		{
+		    ch = KEY_ENTER;
+		    mousewait = I_GetTime() + 15;
+		}
 			
-	    if (ev->data1&2)
-	    {
-		ch = KEY_BACKSPACE;
-		mousewait = I_GetTime() + 15;
+		if (ev->data1&2)
+		{
+		    ch = KEY_BACKSPACE;
+		    mousewait = I_GetTime() + 15;
+		}
 	    }
 	}
 	else
@@ -1610,7 +1624,7 @@ boolean M_Responder (event_t* ev)
     // Pop-up menu?
     if (!menuactive)
     {
-	if (ch == KEY_ESCAPE || ch == KEY_ENTER || ch == ' ')
+	if (ch == KEY_ESCAPE)
 	{
 	    M_StartControlPanel ();
 	    return true;

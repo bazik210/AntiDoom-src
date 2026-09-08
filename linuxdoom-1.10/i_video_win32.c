@@ -148,7 +148,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         ev.data1 = KEY_DOWNARROW; D_PostEvent(&ev);
         return 0;
     case WM_CLOSE:
-        closing = true; ev.type = ev_keydown; ev.data1 = KEY_ESCAPE; D_PostEvent(&ev); return 0;
+        I_Quit();
+        return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProc(h, msg, w, l);

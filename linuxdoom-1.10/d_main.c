@@ -834,6 +834,11 @@ void D_DoomMain (void)
 	I_Log("Bot mode enabled from command line (-bot).\n");
     }
 
+    if (M_CheckParm ("-menumouse"))
+	menu_mouse = 1;
+    if (M_CheckParm ("-nomenumouse"))
+	menu_mouse = -1;
+
     switch ( gamemode )
     {
       case retail:
