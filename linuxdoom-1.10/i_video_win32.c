@@ -49,7 +49,7 @@ static void I_CaptureMouse(boolean capture)
 static void I_UpdateMouseCapture(void)
 {
     HWND active = GetActiveWindow();
-    boolean want_capture = (active == win && GetForegroundWindow() == win) && (fullscreen || !menuactive);
+    boolean want_capture = (active == win && GetForegroundWindow() == win);
     I_CaptureMouse(want_capture);
 }
 
@@ -98,7 +98,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     }
     case WM_LBUTTONDOWN:
         mouse_buttons |= 1;
-        if (!mouse_captured && (fullscreen || !menuactive)) I_CaptureMouse(true);
+        if (!mouse_captured) I_CaptureMouse(true);
         ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
     case WM_LBUTTONUP:
         mouse_buttons &= ~1;
