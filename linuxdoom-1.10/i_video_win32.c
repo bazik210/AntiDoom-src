@@ -26,7 +26,7 @@ static boolean mouse_captured;
 static int mouse_accum_x = 0;
 static int mouse_accum_y = 0;
 
-static void I_CaptureMouse(boolean capture)
+void I_CaptureMouse(boolean capture)
 {
     if (capture == mouse_captured)
         return;
@@ -40,6 +40,7 @@ static void I_CaptureMouse(boolean capture)
         SetCursorPos(pt.x, pt.y);
         MapWindowPoints(win, NULL, (POINT*)&rc, 2);
         ClipCursor(&rc);
+        mouse_accum_x = mouse_accum_y = 0;
     } else {
         ClipCursor(NULL);
         while (ShowCursor(TRUE) < 0);
@@ -49,7 +50,9 @@ static void I_CaptureMouse(boolean capture)
 static void I_UpdateMouseCapture(void)
 {
     HWND active = GetActiveWindow();
-    boolean want_capture = (active == win && GetForegroundWindow() == win);
+    extern int menu_mouse_cursor;
+    boolean want_capture = (active == win && GetForegroundWindow() == win &&
+                           (fullscreen || !menuactive || !menu_mouse_cursor));
     I_CaptureMouse(want_capture);
 }
 
@@ -96,10 +99,22 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         }
         return DefWindowProc(h, msg, w, l);
     }
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
         mouse_buttons |= 1;
-        if (!mouse_captured) I_CaptureMouse(true);
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        extern int menu_mouse_cursor;
+        if (!mouse_captured && (fullscreen || !menuactive || !menu_mouse_cursor)) I_CaptureMouse(true);
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        if (menuactive && menu_mouse_cursor) {
+            RECT rc; GetClientRect(win, &rc);
+            int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
+            ev.data2 = (cw > 0) ? (int)LOWORD(l) * SCREENWIDTH / cw : 0;
+            ev.data3 = (ch > 0) ? (int)HIWORD(l) * SCREENHEIGHT / ch : 0;
+        } else {
+            ev.data2 = 0;
+            ev.data3 = 0;
+        }
+        D_PostEvent(&ev); return 0;
+    }
     case WM_LBUTTONUP:
         mouse_buttons &= ~1;
         ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
@@ -236,15 +251,22 @@ void I_StartTic(void)
         if (msg.message == WM_QUIT) closing = true;
         TranslateMessage(&msg); DispatchMessage(&msg);
     }
-    if (mouse_captured && (mouse_accum_x != 0 || mouse_accum_y != 0)) {
-        event_t ev;
-        ev.type = ev_mouse;
-        ev.data1 = mouse_buttons;
-        ev.data2 = mouse_accum_x << 2;
-        ev.data3 = -mouse_accum_y << 2;
+    extern boolean level_weapon_ready;
+    if (gamestate == GS_LEVEL && !level_weapon_ready) {
         mouse_accum_x = 0;
         mouse_accum_y = 0;
-        D_PostEvent(&ev);
+    }
+    if (mouse_captured) {
+        if (mouse_accum_x != 0 || mouse_accum_y != 0) {
+            event_t ev;
+            ev.type = ev_mouse;
+            ev.data1 = mouse_buttons;
+            ev.data2 = mouse_accum_x << 2;
+            ev.data3 = -mouse_accum_y << 2;
+            mouse_accum_x = 0;
+            mouse_accum_y = 0;
+            D_PostEvent(&ev);
+        }
 
         RECT rc;
         GetClientRect(win, &rc);

@@ -438,6 +438,8 @@ A_Raise
     newstate = weaponinfo[player->readyweapon].readystate;
 
     P_SetPsprite (player, ps_weapon, newstate);
+    extern boolean level_weapon_ready;
+    level_weapon_ready = true;
 }
 
 
@@ -843,6 +845,8 @@ void P_SetupPsprites (player_t* player)
     // spawn the gun
     player->pendingweapon = player->readyweapon;
     P_BringUpWeapon (player);
+    extern boolean level_weapon_ready;
+    level_weapon_ready = false;
 }
 
 

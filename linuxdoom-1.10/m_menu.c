@@ -78,6 +78,9 @@ int			mouseSensitivity;       // has default
 // Show messages has default, 0 = off, 1 = on
 int			showMessages;
 int			menu_mouse = 0;
+int			menu_mouse_cursor = 0;
+static int		mousewait = 0;
+static int		last_menu_buttons = 0;
 	
 
 // Blocky mode, has default, 0 = high, 1 = normal
@@ -1345,6 +1348,32 @@ M_WriteText
 //
 
 //
+// M_IsOverItem
+// Check if (mx, my) is strictly over menu item text
+//
+static boolean M_IsOverItem(int item, int mx, int my)
+{
+    if (item < 0 || item >= currentMenu->numitems)
+	return false;
+    if (currentMenu->menuitems[item].status == -1)
+	return false;
+    int item_y = currentMenu->y + item * LINEHEIGHT;
+    if (my < item_y || my >= item_y + LINEHEIGHT)
+	return false;
+    int item_x = currentMenu->x;
+    int item_w = 120;
+    if (currentMenu->menuitems[item].name[0]) {
+	patch_t* patch = (patch_t*)W_CacheLumpName(currentMenu->menuitems[item].name, PU_CACHE);
+	if (patch) item_w = SHORT(patch->width);
+    } else if (currentMenu == &LoadDef || currentMenu == &SaveDef) {
+	item_w = 200;
+    }
+    if (mx >= item_x + SKULLXOFF && mx <= item_x + item_w)
+	return true;
+    return false;
+}
+
+//
 // M_Responder
 //
 boolean M_Responder (event_t* ev)
@@ -1352,7 +1381,6 @@ boolean M_Responder (event_t* ev)
     int             ch;
     int             i;
     static  int     joywait = 0;
-    static  int     mousewait = 0;
     static  int     mousey = 0;
     static  int     lasty = 0;
     static  int     mousex = 0;
@@ -1439,18 +1467,37 @@ boolean M_Responder (event_t* ev)
 		
 	    if (menu_mouse >= 0)
 	    {
-		if (ev->data1&1)
+		int new_buttons = ev->data1 & ~last_menu_buttons;
+		if (new_buttons & 1)
 		{
-		    ch = KEY_ENTER;
-		    mousewait = I_GetTime() + 15;
+		    if (menu_mouse_cursor)
+		    {
+			int clicked = -1;
+			for (i = 0; i < currentMenu->numitems; i++)
+			{
+			    if (M_IsOverItem(i, ev->data2, ev->data3)) { clicked = i; break; }
+			}
+			if (clicked != -1)
+			{
+			    itemOn = clicked;
+			    ch = KEY_ENTER;
+			    mousewait = I_GetTime() + 15;
+			}
+		    }
+		    else
+		    {
+			ch = KEY_ENTER;
+			mousewait = I_GetTime() + 15;
+		    }
 		}
 			
-		if (ev->data1&2)
+		if (new_buttons & 2)
 		{
 		    ch = KEY_BACKSPACE;
 		    mousewait = I_GetTime() + 15;
 		}
 	    }
+	    last_menu_buttons = ev->data1;
 	}
 	else
 	    if (ev->type == ev_keydown)
@@ -1460,7 +1507,11 @@ boolean M_Responder (event_t* ev)
     }
     
     if (ch == -1)
+    {
+	if ((menuactive || messageToPrint) && (ev->type == ev_mouse || ev->type == ev_joystick))
+	    return true;
 	return false;
+    }
 
     
     // Save Game string input
@@ -1752,6 +1803,8 @@ void M_StartControlPanel (void)
     menuactive = 1;
     currentMenu = &MainDef;         // JDC
     itemOn = currentMenu->lastOn;   // JDC
+    mousewait = I_GetTime() + 8;
+    last_menu_buttons = 0;
     S_StartSound(NULL, sfx_swtchn);
 }
 
@@ -1835,6 +1888,7 @@ void M_Drawer (void)
 void M_ClearMenus (void)
 {
     menuactive = 0;
+    I_CaptureMouse(true);
     // if (!netgame && usergame && paused)
     //       sendpause = true;
 }

@@ -191,6 +191,7 @@ extern int	key_use2;
 extern int	novert;
 extern int	mlook;
 extern int	menu_mouse;
+extern int	menu_mouse_cursor;
 
 extern int	mousebfire;
 extern int	mousebstrafe;
@@ -289,6 +290,7 @@ default_t	defaults[] =
     {"novert",&novert, 1},
     {"mlook",&mlook, 1},
     {"menu_mouse",&menu_mouse, 0},
+    {"menu_mouse_cursor",&menu_mouse_cursor, 0},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},

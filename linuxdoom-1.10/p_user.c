@@ -236,7 +236,8 @@ void P_DeathThink (player_t* player)
 	player->damagecount--;
 	
 
-    if (player->cmd.buttons & (BT_USE | BT_ATTACK))
+    if ((player->cmd.buttons & BT_USE) ||
+        ((player->cmd.buttons & BT_ATTACK) && player->viewheight <= 6*FRACUNIT))
     {
 	extern int lookdir;
 	lookdir = 0;

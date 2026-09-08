@@ -51,6 +51,7 @@ rcsid[] = "$Id: g_game.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 
 // Needs access to LFB.
 #include "v_video.h"
+#include "i_video.h"
 
 #include "w_wad.h"
 
@@ -166,7 +167,7 @@ int		key_use2 = 'e';
 int		novert = 1;
 int		mlook = 1;
 int		lookdir = 0;
-static boolean	level_weapon_ready = false;
+boolean	level_weapon_ready = false;
  
 int             mousebfire; 
 int             mousebstrafe; 
@@ -427,6 +428,12 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	cmd->angleturn -= mousex*0x8; 
 
     mousex = mousey = 0; 
+    if (gamestate == GS_LEVEL && !level_weapon_ready)
+    {
+	cmd->angleturn = 0;
+	cmd->forwardmove = 0;
+	cmd->sidemove = 0;
+    }
 	 
     if (forward > MAXPLMOVE) 
 	forward = MAXPLMOVE; 
@@ -511,6 +518,7 @@ void G_DoLoadLevel (void)
     mousex = mousey = 0; 
     lookdir = 0;
     level_weapon_ready = false;
+    I_CaptureMouse(true);
     sendpause = sendsave = paused = false; 
     memset (mousebuttons, 0, sizeof(mousebuttons)); 
     memset (joybuttons, 0, sizeof(joybuttons)); 
@@ -523,6 +531,13 @@ void G_DoLoadLevel (void)
 // 
 boolean G_Responder (event_t* ev) 
 { 
+    if (menuactive)
+    {
+	if (ev->type == ev_keyup && ev->data1 < NUMKEYS)
+	    gamekeydown[ev->data1] = false;
+	return false;
+    }
+
     // allow spy mode changes even during the demo
     if (gamestate == GS_LEVEL && ev->type == ev_keydown 
 	&& ev->data1 == KEY_F12 && (singledemo || !deathmatch) )
@@ -611,16 +626,23 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[2] = ev->data1 & 4; 
 	if (gamestate == GS_LEVEL && !level_weapon_ready)
 	{
-	    if (players[consoleplayer].psprites[ps_weapon].sy <= 32*FRACUNIT &&
-	        players[consoleplayer].psprites[ps_weapon].state != NULL)
+	    mousebuttons[0] = 0;
+	    mousex = mousey = 0;
+	    return true;
+	}
+	static boolean prev_weapon_ready = false;
+	if (gamestate == GS_LEVEL && !prev_weapon_ready)
+	{
+	    if (level_weapon_ready)
 	    {
-	        level_weapon_ready = true;
-	    }
-	    else
-	    {
+	        prev_weapon_ready = true;
+	        mousex = mousey = 0;
 	        return true;
 	    }
+	    return true;
 	}
+	if (!level_weapon_ready)
+	    prev_weapon_ready = false;
 	if (gamestate == GS_LEVEL && players[consoleplayer].playerstate == PST_DEAD)
 	    return true;
 	mousex += ev->data2*(mouseSensitivity+5)/10; 
@@ -1308,6 +1330,7 @@ void G_DoLoadGame (void)
     
     // draw the pattern into the back screen
     R_FillBackScreen ();   
+    level_weapon_ready = true;
 } 
  
 

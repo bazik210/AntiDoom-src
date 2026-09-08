@@ -38,6 +38,7 @@ void I_InitGraphics (void);
 
 
 void I_ShutdownGraphics(void);
+void I_CaptureMouse (boolean capture);
 
 // Takes full 8 bit values.
 void I_SetPalette (byte* palette);

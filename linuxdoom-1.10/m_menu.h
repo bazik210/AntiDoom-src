@@ -55,6 +55,7 @@ void M_Init (void);
 void M_StartControlPanel (void);
 
 extern int menu_mouse;
+extern int menu_mouse_cursor;
 
 
 
