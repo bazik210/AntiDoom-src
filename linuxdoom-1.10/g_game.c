@@ -621,6 +621,8 @@ boolean G_Responder (event_t* ev)
 	        return true;
 	    }
 	}
+	if (gamestate == GS_LEVEL && players[consoleplayer].playerstate == PST_DEAD)
+	    return true;
 	mousex += ev->data2*(mouseSensitivity+5)/10; 
 	if (mlook)
 	{
@@ -640,6 +642,8 @@ boolean G_Responder (event_t* ev)
 	joybuttons[1] = ev->data1 & 2; 
 	joybuttons[2] = ev->data1 & 4; 
 	joybuttons[3] = ev->data1 & 8; 
+	if (gamestate == GS_LEVEL && players[consoleplayer].playerstate == PST_DEAD)
+	    return true;
 	joyxmove = ev->data2; 
 	joyymove = ev->data3; 
 	return true;    // eat events 

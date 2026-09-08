@@ -196,6 +196,18 @@ void P_DeathThink (player_t* player)
     player->deltaviewheight = 0;
     onground = (player->mo->z <= player->mo->floorz);
     P_CalcHeight (player);
+
+    extern int lookdir;
+    if (lookdir > 0)
+    {
+	lookdir -= 4;
+	if (lookdir < 0) lookdir = 0;
+    }
+    else if (lookdir < 0)
+    {
+	lookdir += 4;
+	if (lookdir > 0) lookdir = 0;
+    }
 	
     if (player->attacker && player->attacker != player->mo)
     {
@@ -224,8 +236,12 @@ void P_DeathThink (player_t* player)
 	player->damagecount--;
 	
 
-    if (player->cmd.buttons & BT_USE)
+    if (player->cmd.buttons & (BT_USE | BT_ATTACK))
+    {
+	extern int lookdir;
+	lookdir = 0;
 	player->playerstate = PST_REBORN;
+    }
 }
 
 
