@@ -92,6 +92,7 @@ fixed_t			dc_texturemid;
 
 // first pixel in a column (possibly virtual) 
 byte*			dc_source;		
+int			dc_source_len = 0;
 
 // just for profiling 
 int			dccount;
@@ -115,6 +116,9 @@ void R_DrawColumn (void)
     // Zero length, column does not exceed a pixel.
     if (count < 0) 
 	return; 
+
+    if (!dc_source || !dc_colormap)
+	return;
 				 
 #ifdef RANGECHECK 
     if ((unsigned)dc_x >= SCREENWIDTH
@@ -138,9 +142,19 @@ void R_DrawColumn (void)
     // This is as fast as it gets.
     do 
     {
+	int index = (frac >> FRACBITS);
+	if (dc_source_len > 0)
+	{
+	    if (index < 0) index = 0;
+	    else if (index >= dc_source_len) index = dc_source_len - 1;
+	}
+	else
+	{
+	    index &= 127;
+	}
 	// Re-map color indices from wall texture column
 	//  using a lighting/special effects LUT.
-	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	*dest = dc_colormap[dc_source[index]];
 	
 	dest += SCREENWIDTH; 
 	frac += fracstep;
@@ -244,8 +258,17 @@ void R_DrawColumnLow (void)
     
     do 
     {
-	// Hack. Does not work corretly.
-	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	int index = (frac >> FRACBITS);
+	if (dc_source_len > 0)
+	{
+	    if (index < 0) index = 0;
+	    else if (index >= dc_source_len) index = dc_source_len - 1;
+	}
+	else
+	{
+	    index &= 127;
+	}
+	*dest2 = *dest = dc_colormap[dc_source[index]];
 	dest += SCREENWIDTH;
 	dest2 += SCREENWIDTH;
 	frac += fracstep; 
@@ -435,12 +458,22 @@ void R_DrawTranslatedColumn (void)
     // Here we do an additional index re-mapping.
     do 
     {
+	int index = (frac >> FRACBITS);
+	if (dc_source_len > 0)
+	{
+	    if (index < 0) index = 0;
+	    else if (index >= dc_source_len) index = dc_source_len - 1;
+	}
+	else
+	{
+	    if (index < 0) index = 0;
+	}
 	// Translation tables are used
 	//  to map certain colorramps to other ones,
 	//  used with PLAY sprites.
 	// Thus the "green" ramp of the player 0 sprite
 	//  is mapped to gray, red, black/indigo. 
-	*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
+	*dest = dc_colormap[dc_translation[dc_source[index]]];
 	dest += SCREENWIDTH;
 	
 	frac += fracstep; 

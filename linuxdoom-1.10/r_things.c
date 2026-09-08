@@ -371,9 +371,10 @@ void R_DrawMaskedColumn (column_t* column)
 	if (dc_yl <= mceilingclip[dc_x])
 	    dc_yl = mceilingclip[dc_x]+1;
 
-	if (dc_yl <= dc_yh)
+	if (dc_yl <= dc_yh && column->length > 0)
 	{
 	    dc_source = (byte *)column + 3;
+	    dc_source_len = column->length;
 	    dc_texturemid = basetexturemid - (column->topdelta<<FRACBITS);
 	    // dc_source = (byte *)column + 3 - column->topdelta;
 
@@ -385,6 +386,7 @@ void R_DrawMaskedColumn (column_t* column)
     }
 	
     dc_texturemid = basetexturemid;
+    dc_source_len = 0;
 }
 
 
@@ -430,6 +432,8 @@ R_DrawVisSprite
     for (dc_x=vis->x1 ; dc_x<=vis->x2 ; dc_x++, frac += vis->xiscale)
     {
 	texturecolumn = frac>>FRACBITS;
+	if (texturecolumn < 0 || texturecolumn >= SHORT(patch->width))
+	    continue;
 #ifdef RANGECHECK
 	if (texturecolumn < 0 || texturecolumn >= SHORT(patch->width))
 	    I_Error ("R_DrawSpriteRange: bad texturecolumn");
@@ -748,13 +752,6 @@ void R_DrawPlayerSprites (void)
     int		i;
     int		lightnum;
     pspdef_t*	psp;
-    int		saved_centery;
-    fixed_t	saved_centeryfrac;
-
-    saved_centery = centery;
-    saved_centeryfrac = centeryfrac;
-    centery = viewheight / 2;
-    centeryfrac = centery << FRACBITS;
     
     // get light level
     lightnum =
@@ -780,9 +777,6 @@ void R_DrawPlayerSprites (void)
 	if (psp->state)
 	    R_DrawPSprite (psp);
     }
-
-    centery = saved_centery;
-    centeryfrac = saved_centeryfrac;
 }
 
 

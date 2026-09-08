@@ -38,6 +38,7 @@ extern fixed_t		dc_texturemid;
 
 // first pixel in a column
 extern byte*		dc_source;		
+extern int		dc_source_len;
 
 
 // The span blitting interface.
