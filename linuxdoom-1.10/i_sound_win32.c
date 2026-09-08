@@ -28,7 +28,7 @@ static void CALLBACK wave_callback(HWAVEOUT h, UINT msg, DWORD_PTR instance, DWO
 {
     WAVEHDR *header;
     (void)h; (void)instance; (void)p2;
-    if (msg == WOM_DONE) { header = (WAVEHDR*)p1; InterlockedExchange(&busy[header->dwUser], 0); waveOutUnprepareHeader(wave, header, sizeof(*header)); }
+    if (msg == WOM_DONE) { header = (WAVEHDR*)p1; InterlockedExchange(&busy[header->dwUser], 0); }
 }
 static int sound_lump(sfxinfo_t *sfx)
 {
@@ -37,16 +37,52 @@ static int sound_lump(sfxinfo_t *sfx)
 }
 void I_InitSound(void)
 {
-    WAVEFORMATEX f; int i, lump, size; byte *raw;
+    WAVEFORMATEX f; int i, b, lump, size; byte *raw;
     memset(&f,0,sizeof(f)); f.wFormatTag=WAVE_FORMAT_PCM; f.nChannels=1; f.nSamplesPerSec=MIXRATE; f.wBitsPerSample=8; f.nBlockAlign=1; f.nAvgBytesPerSec=MIXRATE;
     if (waveOutOpen(&wave,WAVE_MAPPER,&f,(DWORD_PTR)wave_callback,0,CALLBACK_FUNCTION)!=MMSYSERR_NOERROR) { wave=NULL; fprintf(stderr,"Sound: waveOut unavailable\n"); return; }
-    for (i=1;i<NUMSFX;i++) { lump=sound_lump(&S_sfx[i]); size=W_LumpLength(lump); raw=(byte*)W_CacheLumpNum(lump,PU_STATIC); if(size>8){S_sfx[i].data=malloc(size-8);memcpy(S_sfx[i].data,raw+8,size-8);} }
-    for (i=1;i<NUMSFX;i++) if (S_sfx[i].link) S_sfx[i].data = S_sfx[i].link->data;
+    for (b = 0; b < MIXBUFFERS; b++) {
+        memset(&headers[b], 0, sizeof(headers[b]));
+        headers[b].lpData = (LPSTR)audio[b];
+        headers[b].dwBufferLength = MIXSAMPLES;
+        headers[b].dwUser = b;
+        waveOutPrepareHeader(wave, &headers[b], sizeof(headers[b]));
+        busy[b] = 0;
+    }
+    for (i = 1; i < NUMSFX; i++) {
+        if (!S_sfx[i].link) {
+            lump = sound_lump(&S_sfx[i]);
+            size = W_LumpLength(lump);
+            raw = (byte*)W_CacheLumpNum(lump, PU_STATIC);
+            if (size > 8) {
+                S_sfx[i].data = malloc(size - 8);
+                memcpy(S_sfx[i].data, raw + 8, size - 8);
+            }
+        }
+    }
+    for (i = 1; i < NUMSFX; i++) if (S_sfx[i].link) S_sfx[i].data = S_sfx[i].link->data;
     I_InitMusic();
     I_Log("Sound: Windows waveOut initialized (11025 Hz 8-bit mono)\n");
     I_Log("Music: Windows MCI MIDI Sequencer ready\n");
 }
-void I_ShutdownSound(void) { int i; if(wave){waveOutReset(wave);waveOutClose(wave);wave=NULL;} for(i=0;i<NUMSFX;i++){if(!S_sfx[i].link)free(S_sfx[i].data);S_sfx[i].data=NULL;} }
+void I_ShutdownSound(void)
+{
+    int i, b;
+    if (wave) {
+        HWAVEOUT w = wave;
+        wave = NULL;
+        waveOutReset(w);
+        for (b = 0; b < MIXBUFFERS; b++) {
+            waveOutUnprepareHeader(w, &headers[b], sizeof(headers[b]));
+        }
+        waveOutClose(w);
+    }
+    for (i = 1; i < NUMSFX; i++) {
+        if (!S_sfx[i].link && S_sfx[i].data) {
+            free(S_sfx[i].data);
+            S_sfx[i].data = NULL;
+        }
+    }
+}
 void I_UpdateSound(void)
 {
     static DWORD last_loop_check = 0;
@@ -81,8 +117,8 @@ void I_SubmitSound(void)
     for(b=0;b<MIXBUFFERS;b++)if(InterlockedCompareExchange(&busy[b],1,0)==0)break;
     if(b==MIXBUFFERS)return;
     for(s=0;s<MIXSAMPLES;s++){mixed=128;for(c=0;c<MIXCHANNELS;c++)if(channels[c].data){sample=((int)channels[c].data[channels[c].pos]-128)*channels[c].volume/15;sample=sample*(256-abs(channels[c].sep-128))/256;mixed+=sample;if(++channels[c].pos>=channels[c].length)channels[c].data=NULL;}if(mixed<0)mixed=0;if(mixed>255)mixed=255;audio[b][s]=(byte)mixed;}
-    h=&headers[b];memset(h,0,sizeof(*h));h->lpData=(LPSTR)audio[b];h->dwBufferLength=MIXSAMPLES;h->dwUser=b;
-    if(waveOutPrepareHeader(wave,h,sizeof(*h))!=MMSYSERR_NOERROR||waveOutWrite(wave,h,sizeof(*h))!=MMSYSERR_NOERROR)InterlockedExchange(&busy[b],0);
+    h=&headers[b];
+    if(waveOutWrite(wave,h,sizeof(*h))!=MMSYSERR_NOERROR)InterlockedExchange(&busy[b],0);
 }
 static char current_mid_path[MAX_PATH] = {0};
 static const void *current_song_data = NULL;

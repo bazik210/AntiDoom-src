@@ -755,19 +755,20 @@ void M_QuickLoad(void)
 void M_DrawReadThis1(void)
 {
     inhelpscreens = true;
-    switch ( gamemode )
+    char *lump = "HELP1";
+    if (gamemode == commercial)
     {
-      case commercial:
-	V_DrawPatchDirect (0,0,0,W_CacheLumpName("HELP",PU_CACHE));
-	break;
-      case shareware:
-      case registered:
-      case retail:
-	V_DrawPatchDirect (0,0,0,W_CacheLumpName("HELP1",PU_CACHE));
-	break;
-      default:
-	break;
+	if (W_CheckNumForName("HELP") >= 0) lump = "HELP";
+	else if (W_CheckNumForName("HELP1") >= 0) lump = "HELP1";
     }
+    else
+    {
+	if (W_CheckNumForName("HELP1") >= 0) lump = "HELP1";
+	else if (W_CheckNumForName("HELP") >= 0) lump = "HELP";
+	else if (W_CheckNumForName("CREDIT") >= 0) lump = "CREDIT";
+    }
+    if (W_CheckNumForName(lump) >= 0)
+	V_DrawPatchDirect (0,0,0,W_CacheLumpName(lump,PU_CACHE));
     return;
 }
 
@@ -779,20 +780,19 @@ void M_DrawReadThis1(void)
 void M_DrawReadThis2(void)
 {
     inhelpscreens = true;
-    switch ( gamemode )
+    char *lump = "CREDIT";
+    if (gamemode == shareware || gamemode == registered)
     {
-      case retail:
-      case commercial:
-	// This hack keeps us from having to change menus.
-	V_DrawPatchDirect (0,0,0,W_CacheLumpName("CREDIT",PU_CACHE));
-	break;
-      case shareware:
-      case registered:
-	V_DrawPatchDirect (0,0,0,W_CacheLumpName("HELP2",PU_CACHE));
-	break;
-      default:
-	break;
+	if (W_CheckNumForName("HELP2") >= 0) lump = "HELP2";
+	else if (W_CheckNumForName("CREDIT") >= 0) lump = "CREDIT";
     }
+    else
+    {
+	if (W_CheckNumForName("CREDIT") >= 0) lump = "CREDIT";
+	else if (W_CheckNumForName("HELP2") >= 0) lump = "HELP2";
+    }
+    if (W_CheckNumForName(lump) >= 0)
+	V_DrawPatchDirect (0,0,0,W_CacheLumpName(lump,PU_CACHE));
     return;
 }
 

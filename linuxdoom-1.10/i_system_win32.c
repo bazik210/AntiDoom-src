@@ -271,7 +271,9 @@ void I_Quit(void)
     I_ShutdownMusic();
     M_SaveDefaults();
     I_ShutdownGraphics();
-    exit(0);
+    fflush(stdout);
+    fflush(stderr);
+    ExitProcess(0);
 }
 void I_Error(char *error, ...)
 {

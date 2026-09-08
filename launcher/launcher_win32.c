@@ -162,7 +162,7 @@ static void ScanWadFolder(const wchar_t* targetPath)
             } else if (_wcsicmp(fd.cFileName, L"DOOM.WAD") == 0) {
                 swprintf(found_wads[found_wad_count].label, 128, L"%ls (The Ultimate DOOM)", found_wads[found_wad_count].path);
             } else if (_wcsicmp(fd.cFileName, L"DOOM1.WAD") == 0) {
-                swprintf(found_wads[found_wad_count].label, 128, L"%ls (DOOM Shareware)", found_wads[found_wad_count].path);
+                swprintf(found_wads[found_wad_count].label, 128, L"%ls (DOOM / The Ultimate DOOM)", found_wads[found_wad_count].path);
             } else if (_wcsicmp(fd.cFileName, L"PLUTONIA.WAD") == 0) {
                 swprintf(found_wads[found_wad_count].label, 128, L"%ls (Final DOOM: Plutonia)", found_wads[found_wad_count].path);
             } else if (_wcsicmp(fd.cFileName, L"TNT.WAD") == 0) {

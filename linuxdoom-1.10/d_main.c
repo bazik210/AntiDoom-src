@@ -459,7 +459,14 @@ void D_PageTicker (void)
 //
 void D_PageDrawer (void)
 {
-    V_DrawPatch (0,0, 0, W_CacheLumpName(pagename, PU_CACHE));
+    char* name = pagename;
+    if (W_CheckNumForName(name) < 0)
+    {
+        if (W_CheckNumForName("CREDIT") >= 0) name = "CREDIT";
+        else if (W_CheckNumForName("TITLEPIC") >= 0) name = "TITLEPIC";
+        else return;
+    }
+    V_DrawPatch (0,0, 0, W_CacheLumpName(name, PU_CACHE));
 }
 
 
@@ -529,8 +536,10 @@ void D_AdvanceDemo (void)
 
 	    if ( gamemode == retail )
 	      pagename = "CREDIT";
-	    else
+	    else if (W_CheckNumForName("HELP2") >= 0)
 	      pagename = "HELP2";
+	    else
+	      pagename = "CREDIT";
 	}
 	break;
       case 5:
@@ -1105,6 +1114,16 @@ void D_DoomMain (void)
     for (p = 0; wadfiles[p]; p++) ;
     I_Log("Loaded %d WAD file(s):\n", p);
     for (p = 0; wadfiles[p]; p++) I_Log("  [%d] %s\n", p + 1, wadfiles[p]);
+
+    // Detect actual gamemode from loaded lumps (handles doom1.wad as Ultimate Doom, etc.)
+    if (W_CheckNumForName("MAP01") >= 0)
+	gamemode = commercial;
+    else if (W_CheckNumForName("E4M1") >= 0)
+	gamemode = retail;
+    else if (W_CheckNumForName("E2M1") >= 0)
+	gamemode = registered;
+    else
+	gamemode = shareware;
     
 
     // Check for -file in shareware

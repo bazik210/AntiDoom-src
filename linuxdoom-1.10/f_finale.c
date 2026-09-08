@@ -712,7 +712,7 @@ void F_Drawer (void)
 	switch (gameepisode)
 	{
 	  case 1:
-	    if ( gamemode == retail )
+	    if ( gamemode == retail || W_CheckNumForName("HELP2") < 0 )
 	      V_DrawPatch (0,0,0,
 			 W_CacheLumpName("CREDIT",PU_CACHE));
 	    else
