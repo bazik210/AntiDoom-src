@@ -76,6 +76,7 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 
 
 #include "d_main.h"
+#include "p_bot.h"
 
 #define printf I_Log
 
@@ -827,6 +828,12 @@ void D_DoomMain (void)
     else if (M_CheckParm ("-deathmatch"))
 	deathmatch = 1;
 
+    if (M_CheckParm ("-bot"))
+    {
+	bot_active = true;
+	I_Log("Bot mode enabled from command line (-bot).\n");
+    }
+
     switch ( gamemode )
     {
       case retail:
@@ -1180,7 +1187,11 @@ void D_DoomMain (void)
 	if (autostart || netgame)
 	    G_InitNew (startskill, startepisode, startmap);
 	else
+	{
 	    D_StartTitle ();                // start up intro loop
+	    if (bot_active)
+		M_StartControlPanel ();
+	}
 
     }
 

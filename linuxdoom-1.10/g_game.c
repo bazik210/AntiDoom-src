@@ -69,6 +69,7 @@ rcsid[] = "$Id: g_game.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 
 
 #include "g_game.h"
+#include "p_bot.h"
 
 
 #define SAVEGAMESIZE	0x2c000
@@ -246,6 +247,13 @@ int G_CmdChecksum (ticcmd_t* cmd)
 // 
 void G_BuildTiccmd (ticcmd_t* cmd) 
 { 
+    if (bot_active && usergame && gamestate == GS_LEVEL && !demoplayback && players[consoleplayer].playerstate == PST_LIVE && players[consoleplayer].mo)
+    {
+	cmd->consistancy = consistancy[consoleplayer][maketic%BACKUPTICS];
+	Bot_BuildTiccmd(cmd, &players[consoleplayer]);
+	return;
+    }
+
     int		i; 
     boolean	strafe;
     boolean	bstrafe; 
@@ -570,6 +578,13 @@ boolean G_Responder (event_t* ev)
     switch (ev->type) 
     { 
       case ev_keydown: 
+	if (ev->data1 == KEY_F10)
+	{
+	    bot_active = !bot_active;
+	    players[consoleplayer].message = bot_active ? "BOT MODE: ACTIVE (AI PLAYING)" : "BOT MODE: OFF (MANUAL CONTROL)";
+	    I_Log("Bot mode toggled: %s\n", bot_active ? "ON" : "OFF");
+	    return true;
+	}
 	if (ev->data1 == KEY_PAUSE) 
 	{ 
 	    sendpause = true; 

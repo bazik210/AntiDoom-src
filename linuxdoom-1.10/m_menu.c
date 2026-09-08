@@ -1589,9 +1589,11 @@ boolean M_Responder (event_t* ev)
 	    M_QuickLoad();
 	    return true;
 				
-	  case KEY_F10:           // Quit DOOM
-	    S_StartSound(NULL,sfx_swtchn);
-	    M_QuitDOOM(0);
+	  case KEY_F10:           // Toggle Bot AI
+	    extern boolean bot_active;
+	    bot_active = !bot_active;
+	    players[consoleplayer].message = bot_active ? "BOT MODE: ACTIVE (AI PLAYING)" : "BOT MODE: OFF (MANUAL CONTROL)";
+	    I_Log("Bot mode toggled: %s\n", bot_active ? "ON" : "OFF");
 	    return true;
 				
 	  case KEY_F11:           // gamma toggle
@@ -1608,7 +1610,7 @@ boolean M_Responder (event_t* ev)
     // Pop-up menu?
     if (!menuactive)
     {
-	if (ch == KEY_ESCAPE)
+	if (ch == KEY_ESCAPE || ch == KEY_ENTER || ch == ' ')
 	{
 	    M_StartControlPanel ();
 	    return true;

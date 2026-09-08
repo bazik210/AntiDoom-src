@@ -40,6 +40,7 @@ rcsid[] = "$Id: p_setup.c,v 1.5 1997/02/03 22:45:12 b1 Exp $";
 
 #include "doomdef.h"
 #include "p_local.h"
+#include "p_bot.h"
 
 #include "s_sound.h"
 
@@ -687,6 +688,8 @@ P_SetupLevel
     // preload graphics
     if (precache)
 	R_PrecacheLevel ();
+
+    Bot_InitLevel ();
 
     //printf ("free memory: 0x%x\n", Z_FreeMemory());
 
