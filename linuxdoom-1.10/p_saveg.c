@@ -95,6 +95,7 @@ void P_UnArchivePlayers (void)
 	players[i].mo = NULL;	
 	players[i].message = NULL;
 	players[i].attacker = NULL;
+	memset (&players[i].cmd, 0, sizeof(players[i].cmd));
 
 	for (j=0 ; j<NUMPSPRITES ; j++)
 	{
@@ -305,6 +306,11 @@ void P_UnArchiveThinkers (void)
 	    {
 		mobj->player = &players[(int)mobj->player-1];
 		mobj->player->mo = mobj;
+		if (mobj->z <= mobj->floorz)
+		{
+		    mobj->momx = 0;
+		    mobj->momy = 0;
+		}
 	    }
 	    P_SetThingPosition (mobj);
 	    mobj->info = &mobjinfo[mobj->type];

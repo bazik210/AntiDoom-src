@@ -1328,6 +1328,19 @@ void G_DoLoadGame (void)
     prev_weapon_ready = false;
     mousex = mousey = 0;
     lookdir = 0;
+    for (i=0 ; i<MAXPLAYERS ; i++)
+    {
+        if (playeringame[i] && players[i].mo)
+        {
+            if (players[i].mo->z <= players[i].mo->floorz)
+            {
+                players[i].mo->momx = 0;
+                players[i].mo->momy = 0;
+            }
+        }
+    }
+    memset (gamekeydown, 0, sizeof(gamekeydown));
+    joyxmove = joyymove = 0;
     D_ResetTimer ();
     I_ResetMouse ();
 } 

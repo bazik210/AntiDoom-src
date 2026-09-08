@@ -861,10 +861,6 @@ void D_DoomMain (void)
 	menu_mouse = 1;
     if (M_CheckParm ("-nomenumouse"))
 	menu_mouse = 0;
-    if (M_CheckParm ("-menumousecursor"))
-	menu_mouse = 1;
-    if (M_CheckParm ("-nomenumousecursor"))
-	menu_mouse = 0;
 
     switch ( gamemode )
     {

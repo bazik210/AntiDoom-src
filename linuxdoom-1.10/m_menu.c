@@ -78,7 +78,6 @@ int			mouseSensitivity;       // has default
 // Show messages has default, 0 = off, 1 = on
 int			showMessages;
 int			menu_mouse = 0;
-int			menu_mouse_cursor = 0;
 static int		mousewait = 0;
 static int		last_menu_buttons = 0;
 	
@@ -1488,6 +1487,20 @@ boolean M_Responder (event_t* ev)
 		    }
 		}
 
+		if (new_buttons & 2)
+		{
+		    ch = KEY_BACKSPACE;
+		    mousewait = I_GetTime() + 15;
+		}
+	    }
+	    else
+	    {
+		int new_buttons = ev->data1 & ~last_menu_buttons;
+		if (new_buttons & 1)
+		{
+		    ch = KEY_ENTER;
+		    mousewait = I_GetTime() + 15;
+		}
 		if (new_buttons & 2)
 		{
 		    ch = KEY_BACKSPACE;
