@@ -20,6 +20,7 @@ static unsigned int *rgb;
 static int window_width = 960;
 static int window_height = 600;
 static boolean closing;
+static boolean fullscreen;
 
 static int win_key(WPARAM key)
 {
@@ -68,7 +69,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
 void I_InitGraphics(void)
 {
     WNDCLASS wc;
-    RECT r;
+    RECT r, work;
     int p, w = 960, h = 600;
     char *s;
 
@@ -78,6 +79,7 @@ void I_InitGraphics(void)
     p = M_CheckParm("-height"); if (p && p < myargc - 1) h = atoi(myargv[p + 1]);
     if (w < 320) w = 320; if (h < 200) h = 200;
     window_width = w; window_height = h;
+    fullscreen = M_CheckParm("-fullscreen") != 0;
 
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = wndproc; wc.hInstance = GetModuleHandle(NULL);
@@ -85,9 +87,13 @@ void I_InitGraphics(void)
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClass(&wc);
     r.left = 0; r.top = 0; r.right = w; r.bottom = h;
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    win = CreateWindow("DoomWin32", "DOOM II - Win32 port", WS_OVERLAPPEDWINDOW,
-                       CW_USEDEFAULT, CW_USEDEFAULT, r.right-r.left, r.bottom-r.top,
+    if (!fullscreen) AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+    if (fullscreen) { w = work.right - work.left; h = work.bottom - work.top; }
+    win = CreateWindow("DoomWin32", "DOOM II - Win32 port", fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW,
+                       fullscreen ? work.left : work.left + ((work.right-work.left)-(r.right-r.left))/2,
+                       fullscreen ? work.top : work.top + ((work.bottom-work.top)-(r.bottom-r.top))/2,
+                       fullscreen ? w : r.right-r.left, fullscreen ? h : r.bottom-r.top,
                        NULL, NULL, wc.hInstance, NULL);
     if (!win) I_Error("Could not create the Windows window");
     dc = GetDC(win);
