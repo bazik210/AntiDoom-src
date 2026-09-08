@@ -63,10 +63,24 @@ void I_ResetMouse(void)
 static void I_UpdateMouseCapture(void)
 {
     HWND active = GetActiveWindow();
-    extern int menu_mouse_cursor;
+    extern int menu_mouse;
     boolean want_capture = (active == win && GetForegroundWindow() == win &&
-                           (fullscreen || !menuactive || !menu_mouse_cursor));
+                           (fullscreen || !menuactive || !menu_mouse));
     I_CaptureMouse(want_capture);
+}
+
+static void I_FillMenuMouseCoords(event_t *ev, LPARAM l)
+{
+    extern int menu_mouse;
+    if (menuactive && menu_mouse) {
+        RECT rc; GetClientRect(win, &rc);
+        int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
+        ev->data2 = (cw > 0) ? (int)LOWORD(l) * SCREENWIDTH / cw : 0;
+        ev->data3 = (ch > 0) ? (int)HIWORD(l) * SCREENHEIGHT / ch : 0;
+    } else {
+        ev->data2 = 0;
+        ev->data3 = 0;
+    }
 }
 
 static int win_key(WPARAM key)
@@ -114,35 +128,47 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     }
     case WM_LBUTTONDOWN: {
         mouse_buttons |= 1;
-        extern int menu_mouse_cursor;
-        if (!mouse_captured && (fullscreen || !menuactive || !menu_mouse_cursor)) I_CaptureMouse(true);
+        extern int menu_mouse;
+        if (!mouse_captured && (fullscreen || !menuactive || !menu_mouse)) I_CaptureMouse(true);
         ev.type = ev_mouse; ev.data1 = mouse_buttons;
-        if (menuactive && menu_mouse_cursor) {
-            RECT rc; GetClientRect(win, &rc);
-            int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
-            ev.data2 = (cw > 0) ? (int)LOWORD(l) * SCREENWIDTH / cw : 0;
-            ev.data3 = (ch > 0) ? (int)HIWORD(l) * SCREENHEIGHT / ch : 0;
-        } else {
-            ev.data2 = 0;
-            ev.data3 = 0;
-        }
+        I_FillMenuMouseCoords(&ev, l);
         D_PostEvent(&ev); return 0;
+    }
+    case WM_MOUSEMOVE: {
+        extern int menu_mouse;
+        if (menuactive && menu_mouse) {
+            ev.type = ev_mouse; ev.data1 = mouse_buttons;
+            I_FillMenuMouseCoords(&ev, l);
+            D_PostEvent(&ev);
+            return 0;
+        }
+        break;
     }
     case WM_LBUTTONUP:
         mouse_buttons &= ~1;
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        I_FillMenuMouseCoords(&ev, l);
+        D_PostEvent(&ev); return 0;
     case WM_RBUTTONDOWN:
         mouse_buttons |= 2;
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        I_FillMenuMouseCoords(&ev, l);
+        D_PostEvent(&ev); return 0;
     case WM_RBUTTONUP:
         mouse_buttons &= ~2;
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        I_FillMenuMouseCoords(&ev, l);
+        D_PostEvent(&ev); return 0;
     case WM_MBUTTONDOWN:
         mouse_buttons |= 4;
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        I_FillMenuMouseCoords(&ev, l);
+        D_PostEvent(&ev); return 0;
     case WM_MBUTTONUP:
         mouse_buttons &= ~4;
-        ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+        ev.type = ev_mouse; ev.data1 = mouse_buttons;
+        I_FillMenuMouseCoords(&ev, l);
+        D_PostEvent(&ev); return 0;
     case WM_MOUSEWHEEL: {
         short delta = (short)HIWORD(w);
         if (delta > 0) {

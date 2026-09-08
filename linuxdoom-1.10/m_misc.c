@@ -289,8 +289,8 @@ default_t	defaults[] =
     {"key_use2",&key_use2, 'e'},
     {"novert",&novert, 1},
     {"mlook",&mlook, 1},
-    {"menu_mouse",&menu_mouse, 0},
-    {"menu_mouse_cursor",&menu_mouse_cursor, 0},
+    {"menu_mouse",&menu_mouse, 1},
+    {"menu_mouse_cursor",&menu_mouse, 1},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},

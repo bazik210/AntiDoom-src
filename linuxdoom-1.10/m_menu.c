@@ -1358,19 +1358,34 @@ static boolean M_IsOverItem(int item, int mx, int my)
     if (currentMenu->menuitems[item].status == -1)
 	return false;
     int item_y = currentMenu->y + item * LINEHEIGHT;
-    if (my < item_y || my >= item_y + LINEHEIGHT)
-	return false;
     int item_x = currentMenu->x;
     int item_w = 120;
+    int item_h = 16;
     if (currentMenu->menuitems[item].name[0]) {
 	patch_t* patch = (patch_t*)W_CacheLumpName(currentMenu->menuitems[item].name, PU_CACHE);
-	if (patch) item_w = SHORT(patch->width);
+	if (patch) {
+	    item_w = SHORT(patch->width);
+	    item_h = SHORT(patch->height);
+	}
     } else if (currentMenu == &LoadDef || currentMenu == &SaveDef) {
-	item_w = 200;
+	item_w = 198;
+	item_h = 14;
     }
-    if (mx >= item_x + SKULLXOFF && mx <= item_x + item_w)
-	return true;
-    return false;
+    if (mx < item_x + SKULLXOFF || mx >= item_x + item_w)
+	return false;
+    if (mx < item_x) {
+	if (my < item_y - 4 || my >= item_y + 14)
+	    return false;
+    } else {
+	if (currentMenu == &LoadDef || currentMenu == &SaveDef) {
+	    if (my < item_y - 3 || my >= item_y + 12)
+		return false;
+	} else {
+	    if (my < item_y || my >= item_y + item_h)
+		return false;
+	}
+    }
+    return true;
 }
 
 //
@@ -1434,63 +1449,45 @@ boolean M_Responder (event_t* ev)
     {
 	if (ev->type == ev_mouse)
 	{
-	    if (menu_mouse == 1 && mousewait < I_GetTime())
+	    if (menu_mouse)
 	    {
-		mousey += ev->data3;
-		if (mousey < lasty-30)
+		if (menuactive && currentMenu)
 		{
-		    ch = KEY_DOWNARROW;
-		    mousewait = I_GetTime() + 5;
-		    mousey = lasty -= 30;
+		    int hovered = -1;
+		    for (i = 0; i < currentMenu->numitems; i++)
+		    {
+			if (M_IsOverItem(i, ev->data2, ev->data3))
+			{
+			    hovered = i;
+			    break;
+			}
+		    }
+		    if (hovered != -1 && hovered != itemOn)
+		    {
+			itemOn = hovered;
+			S_StartSound(NULL, sfx_pstop);
+		    }
 		}
-		else if (mousey > lasty+30)
-		{
-		    ch = KEY_UPARROW;
-		    mousewait = I_GetTime() + 5;
-		    mousey = lasty += 30;
-		}
-		
-		mousex += ev->data2;
-		if (mousex < lastx-30)
-		{
-		    ch = KEY_LEFTARROW;
-		    mousewait = I_GetTime() + 5;
-		    mousex = lastx -= 30;
-		}
-		else if (mousex > lastx+30)
-		{
-		    ch = KEY_RIGHTARROW;
-		    mousewait = I_GetTime() + 5;
-		    mousex = lastx += 30;
-		}
-	    }
-		
-	    if (menu_mouse >= 0)
-	    {
+
 		int new_buttons = ev->data1 & ~last_menu_buttons;
 		if (new_buttons & 1)
 		{
-		    if (menu_mouse_cursor)
+		    int clicked = -1;
+		    if (menuactive && currentMenu)
 		    {
-			int clicked = -1;
 			for (i = 0; i < currentMenu->numitems; i++)
 			{
 			    if (M_IsOverItem(i, ev->data2, ev->data3)) { clicked = i; break; }
 			}
-			if (clicked != -1)
-			{
-			    itemOn = clicked;
-			    ch = KEY_ENTER;
-			    mousewait = I_GetTime() + 15;
-			}
 		    }
-		    else
+		    if (clicked != -1)
 		    {
+			itemOn = clicked;
 			ch = KEY_ENTER;
 			mousewait = I_GetTime() + 15;
 		    }
 		}
-			
+
 		if (new_buttons & 2)
 		{
 		    ch = KEY_BACKSPACE;
