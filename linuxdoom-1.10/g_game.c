@@ -165,6 +165,7 @@ int		key_use2 = 'e';
 int		novert = 1;
 int		mlook = 1;
 int		lookdir = 0;
+static boolean	level_weapon_ready = false;
  
 int             mousebfire; 
 int             mousebstrafe; 
@@ -501,6 +502,7 @@ void G_DoLoadLevel (void)
     joyxmove = joyymove = 0; 
     mousex = mousey = 0; 
     lookdir = 0;
+    level_weapon_ready = false;
     sendpause = sendsave = paused = false; 
     memset (mousebuttons, 0, sizeof(mousebuttons)); 
     memset (joybuttons, 0, sizeof(joybuttons)); 
@@ -586,6 +588,18 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[0] = ev->data1 & 1; 
 	mousebuttons[1] = ev->data1 & 2; 
 	mousebuttons[2] = ev->data1 & 4; 
+	if (gamestate == GS_LEVEL && !level_weapon_ready)
+	{
+	    if (players[consoleplayer].psprites[ps_weapon].sy <= 32*FRACUNIT &&
+	        players[consoleplayer].psprites[ps_weapon].state != NULL)
+	    {
+	        level_weapon_ready = true;
+	    }
+	    else
+	    {
+	        return true;
+	    }
+	}
 	mousex += ev->data2*(mouseSensitivity+5)/10; 
 	if (mlook)
 	{

@@ -250,22 +250,6 @@ void I_StartTic(void)
         ClientToScreen(win, &pt);
         SetCursorPos(pt.x, pt.y);
     }
-    if (mouse_captured && (mouse_accum_x != 0 || mouse_accum_y != 0)) {
-        event_t ev;
-        ev.type = ev_mouse;
-        ev.data1 = mouse_buttons;
-        ev.data2 = mouse_accum_x << 2;
-        ev.data3 = -mouse_accum_y << 2;
-        mouse_accum_x = 0;
-        mouse_accum_y = 0;
-        D_PostEvent(&ev);
-
-        RECT rc;
-        GetClientRect(win, &rc);
-        POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-        ClientToScreen(win, &pt);
-        SetCursorPos(pt.x, pt.y);
-    }
 }
 
 void I_FinishUpdate(void)
