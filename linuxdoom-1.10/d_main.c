@@ -1118,7 +1118,7 @@ void D_DoomMain (void)
     // Detect actual gamemode from loaded lumps (handles doom1.wad as Ultimate Doom, etc.)
     if (W_CheckNumForName("MAP01") >= 0)
 	gamemode = commercial;
-    else if (W_CheckNumForName("E4M1") >= 0)
+    else if (W_CheckNumForName("E4M1") >= 0 && W_CheckNumForName("M_EPI4") >= 0)
 	gamemode = retail;
     else if (W_CheckNumForName("E2M1") >= 0)
 	gamemode = registered;

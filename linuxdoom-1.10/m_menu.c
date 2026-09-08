@@ -1879,7 +1879,7 @@ void M_Drawer (void)
 
     for (i=0;i<max;i++)
     {
-	if (currentMenu->menuitems[i].name[0])
+	if (currentMenu->menuitems[i].name[0] && W_CheckNumForName(currentMenu->menuitems[i].name) >= 0)
 	    V_DrawPatchDirect (x,y,0,
 			       W_CacheLumpName(currentMenu->menuitems[i].name ,PU_CACHE));
 	y += LINEHEIGHT;
@@ -1979,5 +1979,7 @@ void M_Init (void)
 	break;
     }
     
+    if (W_CheckNumForName("M_EPI4") < 0 && EpiDef.numitems > 3)
+	EpiDef.numitems = 3;
 }
 
