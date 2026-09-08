@@ -598,6 +598,8 @@ A_FirePlasma
 fixed_t		bulletslope;
 
 
+extern int mlook;
+extern int lookdir;
 void P_BulletSlope (mobj_t*	mo)
 {
     angle_t	an;
@@ -616,6 +618,8 @@ void P_BulletSlope (mobj_t*	mo)
 	    bulletslope = P_AimLineAttack (mo, an, 16*64*FRACUNIT);
 	}
     }
+    if (!linetarget && mlook && lookdir != 0)
+	bulletslope = (lookdir * FRACUNIT) / 160;
 }
 
 

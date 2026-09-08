@@ -830,6 +830,22 @@ R_PointInSubsector
 void R_SetupFrame (player_t* player)
 {		
     int		i;
+    extern int mlook;
+    extern int lookdir;
+    static int last_centery = -1;
+    centery = viewheight/2 + (mlook ? lookdir : 0);
+    centeryfrac = centery<<FRACBITS;
+    if (centery != last_centery)
+    {
+	last_centery = centery;
+	for (i=0 ; i<viewheight ; i++)
+	{
+	    int dy = ((i-centery)<<FRACBITS)+FRACUNIT/2;
+	    dy = abs(dy);
+	    if (dy == 0) dy = 1;
+	    yslope[i] = FixedDiv ( (viewwidth<<detailshift)/2*FRACUNIT, dy);
+	}
+    }
     
     viewplayer = player;
     viewx = player->mo->x;

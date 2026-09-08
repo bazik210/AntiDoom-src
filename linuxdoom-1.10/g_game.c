@@ -163,6 +163,8 @@ int		key_straferight2 = 'd';
 int		key_fire2 = 0;
 int		key_use2 = 'e';
 int		novert = 1;
+int		mlook = 1;
+int		lookdir = 0;
  
 int             mousebfire; 
 int             mousebstrafe; 
@@ -498,6 +500,7 @@ void G_DoLoadLevel (void)
     memset (gamekeydown, 0, sizeof(gamekeydown)); 
     joyxmove = joyymove = 0; 
     mousex = mousey = 0; 
+    lookdir = 0;
     sendpause = sendsave = paused = false; 
     memset (mousebuttons, 0, sizeof(mousebuttons)); 
     memset (joybuttons, 0, sizeof(joybuttons)); 
@@ -583,8 +586,18 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[0] = ev->data1 & 1; 
 	mousebuttons[1] = ev->data1 & 2; 
 	mousebuttons[2] = ev->data1 & 4; 
-	mousex = ev->data2*(mouseSensitivity+5)/10; 
-	mousey = novert ? 0 : ev->data3*(mouseSensitivity+5)/10; 
+	mousex += ev->data2*(mouseSensitivity+5)/10; 
+	if (mlook)
+	{
+	    static int lookdir_rem = 0;
+	    int val = ev->data3*(mouseSensitivity+5) + lookdir_rem;
+	    lookdir += val / 80;
+	    lookdir_rem = val % 80;
+	    if (lookdir > 100) lookdir = 100;
+	    if (lookdir < -110) lookdir = -110;
+	}
+	else
+	    mousey += novert ? 0 : ev->data3*(mouseSensitivity+5)/10; 
 	return true;    // eat events 
  
       case ev_joystick: 

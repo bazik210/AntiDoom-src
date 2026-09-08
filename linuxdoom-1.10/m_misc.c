@@ -189,6 +189,7 @@ extern int	key_straferight2;
 extern int	key_fire2;
 extern int	key_use2;
 extern int	novert;
+extern int	mlook;
 
 extern int	mousebfire;
 extern int	mousebstrafe;
@@ -285,6 +286,7 @@ default_t	defaults[] =
     {"key_fire2",&key_fire2, 0},
     {"key_use2",&key_use2, 'e'},
     {"novert",&novert, 1},
+    {"mlook",&mlook, 1},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},
@@ -374,6 +376,8 @@ void M_LoadDefaults (void)
     }
     
     // check for a custom default file
+    if (M_CheckParm("-nomlook")) mlook = 0;
+    if (M_CheckParm("-mlook")) mlook = 1;
     i = M_CheckParm ("-config");
     if (i && i<myargc-1)
     {

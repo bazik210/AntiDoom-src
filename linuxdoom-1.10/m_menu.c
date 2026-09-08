@@ -1621,6 +1621,8 @@ boolean M_Responder (event_t* ev)
     // Keys usable within menu
     switch (ch)
     {
+      case 's':
+      case 'S':
       case KEY_DOWNARROW:
 	do
 	{
@@ -1631,6 +1633,8 @@ boolean M_Responder (event_t* ev)
 	} while(currentMenu->menuitems[itemOn].status==-1);
 	return true;
 		
+      case 'w':
+      case 'W':
       case KEY_UPARROW:
 	do
 	{
@@ -1641,6 +1645,8 @@ boolean M_Responder (event_t* ev)
 	} while(currentMenu->menuitems[itemOn].status==-1);
 	return true;
 
+      case 'a':
+      case 'A':
       case KEY_LEFTARROW:
 	if (currentMenu->menuitems[itemOn].routine &&
 	    currentMenu->menuitems[itemOn].status == 2)
@@ -1650,6 +1656,8 @@ boolean M_Responder (event_t* ev)
 	}
 	return true;
 		
+      case 'd':
+      case 'D':
       case KEY_RIGHTARROW:
 	if (currentMenu->menuitems[itemOn].routine &&
 	    currentMenu->menuitems[itemOn].status == 2)

@@ -23,6 +23,8 @@ static boolean closing;
 static boolean fullscreen;
 static int mouse_buttons;
 static boolean mouse_captured;
+static int mouse_accum_x = 0;
+static int mouse_accum_y = 0;
 
 static void I_CaptureMouse(boolean capture)
 {
@@ -88,21 +90,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         UINT dwSize = sizeof(RAWINPUT);
         if (GetRawInputData((HRAWINPUT)l, RID_INPUT, &raw, &dwSize, sizeof(RAWINPUTHEADER)) != (UINT)-1) {
             if (raw.header.dwType == RIM_TYPEMOUSE && mouse_captured) {
-                int dx = raw.data.mouse.lLastX;
-                int dy = raw.data.mouse.lLastY;
-                if (dx != 0 || dy != 0) {
-                    ev.type = ev_mouse;
-                    ev.data1 = mouse_buttons;
-                    ev.data2 = dx << 2;
-                    ev.data3 = -dy << 2;
-                    D_PostEvent(&ev);
-
-                    RECT rc;
-                    GetClientRect(win, &rc);
-                    POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-                    ClientToScreen(win, &pt);
-                    SetCursorPos(pt.x, pt.y);
-                }
+                mouse_accum_x += raw.data.mouse.lLastX;
+                mouse_accum_y += raw.data.mouse.lLastY;
             }
         }
         return DefWindowProc(h, msg, w, l);
@@ -126,6 +115,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     case WM_MBUTTONUP:
         mouse_buttons &= ~4;
         ev.type = ev_mouse; ev.data1 = mouse_buttons; ev.data2 = ev.data3 = 0; D_PostEvent(&ev); return 0;
+    case WM_MOUSEWHEEL: {
+        short delta = (short)HIWORD(w);
+        if (delta > 0) {
+            ev.type = ev_keydown; ev.data1 = KEY_UPARROW; D_PostEvent(&ev);
+            ev.type = ev_keyup; D_PostEvent(&ev);
+        } else if (delta < 0) {
+            ev.type = ev_keydown; ev.data1 = KEY_DOWNARROW; D_PostEvent(&ev);
+            ev.type = ev_keyup; D_PostEvent(&ev);
+        }
+        return 0;
+    }
     case WM_SETFOCUS:
         I_UpdateMouseCapture();
         return 0;
@@ -233,6 +233,38 @@ void I_StartTic(void)
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) closing = true;
         TranslateMessage(&msg); DispatchMessage(&msg);
+    }
+    if (mouse_captured && (mouse_accum_x != 0 || mouse_accum_y != 0)) {
+        event_t ev;
+        ev.type = ev_mouse;
+        ev.data1 = mouse_buttons;
+        ev.data2 = mouse_accum_x << 2;
+        ev.data3 = -mouse_accum_y << 2;
+        mouse_accum_x = 0;
+        mouse_accum_y = 0;
+        D_PostEvent(&ev);
+
+        RECT rc;
+        GetClientRect(win, &rc);
+        POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        ClientToScreen(win, &pt);
+        SetCursorPos(pt.x, pt.y);
+    }
+    if (mouse_captured && (mouse_accum_x != 0 || mouse_accum_y != 0)) {
+        event_t ev;
+        ev.type = ev_mouse;
+        ev.data1 = mouse_buttons;
+        ev.data2 = mouse_accum_x << 2;
+        ev.data3 = -mouse_accum_y << 2;
+        mouse_accum_x = 0;
+        mouse_accum_y = 0;
+        D_PostEvent(&ev);
+
+        RECT rc;
+        GetClientRect(win, &rc);
+        POINT pt = { (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        ClientToScreen(win, &pt);
+        SetCursorPos(pt.x, pt.y);
     }
 }
 
