@@ -4,20 +4,24 @@
 //
 // Features:
 // - Dynamic level waypoint graph generation from map geometry (portals, doors, keys, exit)
-// - BFS / Dijkstra pathfinding to items, keys, doors, and the level exit
+// - Robust doorway connectivity (front/mid/back nodes linked through door threshold)
+// - Walkable exit switch approach nodes (placed in front of 1-sided wall switches)
+// - Smart key progression: identifies locked doors, prioritizes finding required
+//   keys (Red, Blue, Yellow), and avoids pressing locked doors without keys
+// - Pulsed BT_USE interaction (prevents usedown lock and wall grunting)
+// - Decoupled path execution from replanning (advances step-by-step to exit)
+// - Multi-whisker collision detection (P_CheckPosition) for smooth cornering
 // - Threat detection using engine BSP line-of-sight (P_CheckSight)
 // - Smooth horizontal camera tracking and full 3D vertical pitch aiming (lookdir)
 // - Intelligent weapon selection (SSG, Shotgun, Chaingun, Rockets, Plasma)
 // - Tactical combat strafing, circle-strafing, and backpedaling from melee threats
-// - Key collection logic (locates keys, unlocks doors, resumes exit path)
-// - Interactive doors, switches, and exit line activation (BT_USE)
-// - Obstacle avoidance feelers and anti-stuck recovery
 //
 //-----------------------------------------------------------------------------
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "doomdef.h"
 #include "doomstat.h"
@@ -39,8 +43,8 @@ boolean bot_active = false;
 extern int lookdir;
 extern int mlook;
 
-#define MAX_BOT_WAYPOINTS 512
-#define MAX_BOT_EDGES     16
+#define MAX_BOT_WAYPOINTS 640
+#define MAX_BOT_EDGES     24
 #define ANG10             (ANG45 / 4)
 #define BOT_MAXMOVE       50
 
@@ -71,46 +75,29 @@ static int bot_exit_wp = -1;
 // Combat state
 static int bot_strafe_dir = 1;
 static int bot_strafe_timer = 0;
-static int bot_attack_delay = 0;
 
 // Stuck recovery
 static fixed_t bot_last_x = 0;
 static fixed_t bot_last_y = 0;
 static int bot_stuck_tics = 0;
-static int bot_unstuck_phase = 0;
+static int bot_last_keys = 0;
 
 // Path cache
 static int bot_current_target_wp = -1;
 static int bot_path_cache[MAX_BOT_WAYPOINTS];
 static int bot_path_len = 0;
 static int bot_path_step = 0;
+static int bot_replan_timer = 0;
 
-// Helper: Check sight between arbitrary coordinates via BSP
-static boolean Bot_CheckSightCoords(fixed_t x1, fixed_t y1, fixed_t z1, fixed_t x2, fixed_t y2, fixed_t z2)
-{
-    static mobj_t d1, d2;
-    subsector_t* ss1 = R_PointInSubsector(x1, y1);
-    subsector_t* ss2 = R_PointInSubsector(x2, y2);
-    if (!ss1 || !ss2) return false;
-
-    memset(&d1, 0, sizeof(d1));
-    memset(&d2, 0, sizeof(d2));
-
-    d1.x = x1; d1.y = y1; d1.z = z1; d1.height = 56*FRACUNIT; d1.subsector = ss1;
-    d2.x = x2; d2.y = y2; d2.z = z2; d2.height = 56*FRACUNIT; d2.subsector = ss2;
-
-    return P_CheckSight(&d1, &d2);
-}
-
-// Check if a line is an exit trigger/switch
+// Check if a line is an exit trigger or switch
 static boolean Bot_IsExitLine(line_t* line)
 {
     if (!line) return false;
     switch (line->special)
     {
         case 11:  // S1 Exit
-        case 51:  // W1 Exit
-        case 52:  // WR Exit
+        case 51:  // S1 Secret Exit
+        case 52:  // W1 Exit
         case 124: // W1 Secret Exit
         case 197: // G1 Exit
         case 198: // GR Exit
@@ -137,7 +124,7 @@ static int Bot_DoorRequiredKey(line_t* line)
     }
 }
 
-// Check if player has the required key
+// Check if player has the required key (cards or skulls both satisfy)
 static boolean Bot_HasKey(player_t* player, int key)
 {
     if (key < 0) return true;
@@ -147,28 +134,91 @@ static boolean Bot_HasKey(player_t* player, int key)
     return true;
 }
 
+// Check if a line is any door type
+static boolean Bot_IsDoor(line_t* line)
+{
+    if (!line) return false;
+    switch (line->special)
+    {
+        case 1: case 2: case 4: case 10:
+        case 26: case 27: case 28: case 29:
+        case 31: case 32: case 33: case 34:
+        case 46: case 63: case 86: case 99:
+        case 103: case 114: case 115: case 116:
+        case 117: case 118:
+        case 133: case 134: case 135: case 136: case 137:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Check if door is currently closed
 static boolean Bot_IsDoorClosed(line_t* line)
 {
     if (!line || !line->backsector) return false;
-    fixed_t h1 = line->frontsector->ceilingheight - line->frontsector->floorheight;
-    fixed_t h2 = line->backsector->ceilingheight - line->backsector->floorheight;
-    if (h1 < 56*FRACUNIT || h2 < 56*FRACUNIT) return true;
+    fixed_t h = line->backsector->ceilingheight - line->backsector->floorheight;
+    if (h < 56*FRACUNIT) return true;
     return false;
 }
 
-// Add a waypoint if not too close to existing ones
+// Helper: Check sight between arbitrary coordinates via BSP
+static boolean Bot_CheckSightCoords(fixed_t x1, fixed_t y1, fixed_t z1, fixed_t x2, fixed_t y2, fixed_t z2)
+{
+    static mobj_t d1, d2;
+    subsector_t* ss1 = R_PointInSubsector(x1, y1);
+    subsector_t* ss2 = R_PointInSubsector(x2, y2);
+    if (!ss1 || !ss2) return false;
+
+    memset(&d1, 0, sizeof(d1));
+    memset(&d2, 0, sizeof(d2));
+
+    d1.x = x1; d1.y = y1; d1.z = z1; d1.height = 56*FRACUNIT; d1.subsector = ss1;
+    d2.x = x2; d2.y = y2; d2.z = z2; d2.height = 56*FRACUNIT; d2.subsector = ss2;
+
+    return P_CheckSight(&d1, &d2);
+}
+
+// Add a directed edge from u to v
+static void Bot_AddDirectedEdge(int u, int v, int dist)
+{
+    if (u < 0 || v < 0 || u >= bot_num_wp || v >= bot_num_wp || u == v) return;
+
+    for (int i = 0; i < bot_wp[u].num_edges; i++)
+    {
+        if (bot_wp[u].edges[i] == v) return;
+    }
+
+    if (bot_wp[u].num_edges < MAX_BOT_EDGES)
+    {
+        int e = bot_wp[u].num_edges++;
+        bot_wp[u].edges[e] = v;
+        bot_wp[u].edge_dist[e] = dist;
+    }
+}
+
+// Add a bidirectional edge between waypoints
+static void Bot_AddEdge(int u, int v, int dist)
+{
+    Bot_AddDirectedEdge(u, v, dist);
+    Bot_AddDirectedEdge(v, u, dist);
+}
+
+// Add a waypoint
 static int Bot_AddWaypoint(fixed_t x, fixed_t y, fixed_t z, wptype_t type, line_t* line, int req_key)
 {
     if (bot_num_wp >= MAX_BOT_WAYPOINTS) return -1;
 
-    for (int i = 0; i < bot_num_wp; i++)
+    // Check proximity to existing waypoints (don't merge doors/exits/keys)
+    if (type == WP_NORMAL)
     {
-        fixed_t d = P_AproxDistance(bot_wp[i].x - x, bot_wp[i].y - y);
-        if (d < 48*FRACUNIT)
+        for (int i = 0; i < bot_num_wp; i++)
         {
-            if (type == WP_EXIT) { bot_wp[i].type = WP_EXIT; bot_wp[i].line = line; bot_exit_wp = i; }
-            return i;
+            fixed_t d = P_AproxDistance(bot_wp[i].x - x, bot_wp[i].y - y);
+            if (d < 36*FRACUNIT)
+            {
+                return i;
+            }
         }
     }
 
@@ -194,25 +244,22 @@ static void Bot_BuildGraph(void)
         for (int j = i + 1; j < bot_num_wp; j++)
         {
             fixed_t dist = P_AproxDistance(bot_wp[i].x - bot_wp[j].x, bot_wp[i].y - bot_wp[j].y);
-            if (dist > 1600*FRACUNIT) continue;
+            if (dist > 1200*FRACUNIT) continue;
 
             fixed_t f1 = bot_wp[i].z;
             fixed_t f2 = bot_wp[j].z;
-            if (abs(f1 - f2) > 36*FRACUNIT) continue;
+
+            // In DOOM, players can drop down up to 128 units, but only step UP 24 units
+            boolean can_ij = ((f2 - f1) <= 24*FRACUNIT) && ((f1 - f2) <= 128*FRACUNIT);
+            boolean can_ji = ((f1 - f2) <= 24*FRACUNIT) && ((f2 - f1) <= 128*FRACUNIT);
+            if (!can_ij && !can_ji) continue;
 
             if (Bot_CheckSightCoords(bot_wp[i].x, bot_wp[i].y, f1 + 24*FRACUNIT,
                                      bot_wp[j].x, bot_wp[j].y, f2 + 24*FRACUNIT))
             {
-                if (bot_wp[i].num_edges < MAX_BOT_EDGES && bot_wp[j].num_edges < MAX_BOT_EDGES)
-                {
-                    int e1 = bot_wp[i].num_edges++;
-                    bot_wp[i].edges[e1] = j;
-                    bot_wp[i].edge_dist[e1] = (int)(dist >> FRACBITS);
-
-                    int e2 = bot_wp[j].num_edges++;
-                    bot_wp[j].edges[e2] = i;
-                    bot_wp[j].edge_dist[e2] = (int)(dist >> FRACBITS);
-                }
+                int idist = (int)(dist >> FRACBITS);
+                if (can_ij) Bot_AddDirectedEdge(i, j, idist);
+                if (can_ji) Bot_AddDirectedEdge(j, i, idist);
             }
         }
     }
@@ -227,13 +274,16 @@ void Bot_InitLevel(void)
     bot_current_target_wp = -1;
     bot_path_len = 0;
     bot_path_step = 0;
+    bot_replan_timer = 0;
 
     I_Log("Bot: Initializing navigation graph for level...\n");
 
     // 1. Add Player Spawn
-    Bot_AddWaypoint(playerstarts[0].x * FRACUNIT, playerstarts[0].y * FRACUNIT, 0, WP_NORMAL, NULL, -1);
+    subsector_t* sp_ss = R_PointInSubsector(playerstarts[0].x * FRACUNIT, playerstarts[0].y * FRACUNIT);
+    fixed_t sp_z = sp_ss ? sp_ss->sector->floorheight : 0;
+    Bot_AddWaypoint(playerstarts[0].x * FRACUNIT, playerstarts[0].y * FRACUNIT, sp_z, WP_NORMAL, NULL, -1);
 
-    // 2. Scan Lines: portals, doors, exit lines
+    // 2. Scan Lines: doors, portals, exit switches
     for (int i = 0; i < numlines; i++)
     {
         line_t* li = &lines[i];
@@ -241,56 +291,88 @@ void Bot_InitLevel(void)
         fixed_t my = (li->v1->y + li->v2->y) / 2;
         fixed_t mz = li->frontsector ? li->frontsector->floorheight : 0;
 
+        fixed_t dx = li->v2->x - li->v1->x;
+        fixed_t dy = li->v2->y - li->v1->y;
+        fixed_t len = P_AproxDistance(dx, dy);
+        if (len == 0) continue;
+
+        // Normal perpendicular to line
+        fixed_t nx = FixedDiv(-dy, len);
+        fixed_t ny = FixedDiv(dx, len);
+
         if (Bot_IsExitLine(li))
         {
-            // Exit line
-            Bot_AddWaypoint(mx, my, mz, WP_EXIT, li, -1);
+            if (!(li->flags & ML_TWOSIDED))
+            {
+                // One-sided wall exit switch: place waypoint 36 units out in front room
+                fixed_t fnx = FixedDiv(dy, len);
+                fixed_t fny = FixedDiv(-dx, len);
+                fixed_t ex = mx + FixedMul(fnx, 36*FRACUNIT);
+                fixed_t ey = my + FixedMul(fny, 36*FRACUNIT);
+                Bot_AddWaypoint(ex, ey, mz, WP_EXIT, li, -1);
+            }
+            else
+            {
+                // Two-sided exit walk-over trigger
+                Bot_AddWaypoint(mx, my, mz, WP_EXIT, li, -1);
+            }
         }
         else if (li->flags & ML_TWOSIDED)
         {
             int req_key = Bot_DoorRequiredKey(li);
-            if (li->special != 0 || req_key >= 0)
+            if (Bot_IsDoor(li) || req_key >= 0)
             {
-                // Door or passage with special
-                Bot_AddWaypoint(mx, my, mz, WP_DOOR, li, req_key);
+                // Door: add front, middle, and back waypoints with explicit edge link
+                int w_mid = Bot_AddWaypoint(mx, my, mz, WP_DOOR, li, req_key);
+                int w_front = Bot_AddWaypoint(mx + FixedMul(nx, 44*FRACUNIT), my + FixedMul(ny, 44*FRACUNIT), mz, WP_NORMAL, NULL, -1);
+                int w_back = Bot_AddWaypoint(mx - FixedMul(nx, 44*FRACUNIT), my - FixedMul(ny, 44*FRACUNIT), mz, WP_NORMAL, NULL, -1);
+
+                Bot_AddEdge(w_front, w_mid, 44);
+                Bot_AddEdge(w_mid, w_back, 44);
             }
             else
             {
-                // Regular room-connecting portal
-                fixed_t hdiff = abs(li->frontsector->floorheight - li->backsector->floorheight);
-                if (hdiff <= 28*FRACUNIT)
+                // Regular room portal or step-down ledge
+                fixed_t f1 = li->frontsector->floorheight;
+                fixed_t f2 = li->backsector->floorheight;
+                fixed_t hdiff = abs(f1 - f2);
+                if (hdiff <= 128*FRACUNIT)
                 {
-                    Bot_AddWaypoint(mx, my, mz, WP_NORMAL, li, -1);
+                    fixed_t pz = (f1 > f2) ? f1 : f2;
+                    Bot_AddWaypoint(mx, my, pz, WP_NORMAL, li, -1);
                 }
             }
         }
     }
 
-    // 3. Scan Items: Keys and Super Weapons
+    // 3. Scan Items: Keys and Weapons
     thinker_t* th;
-    for (th = thinkercap.next; th != &thinkercap; th = th->next)
+    if (thinkercap.next)
     {
-        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
-        mobj_t* mo = (mobj_t*)th;
-        if (!(mo->flags & MF_SPECIAL)) continue;
-
-        switch (mo->sprite)
+        for (th = thinkercap.next; th && th != &thinkercap; th = th->next)
         {
-            case SPR_BKEY: case SPR_BSKU:
-                Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_bluecard);
-                break;
-            case SPR_RKEY: case SPR_RSKU:
-                Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_redcard);
-                break;
-            case SPR_YKEY: case SPR_YSKU:
-                Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_yellowcard);
-                break;
-            case SPR_SGN2: case SPR_MGUN: case SPR_LAUN: case SPR_PLAS: case SPR_BFUG:
-            case SPR_SOUL: case SPR_MEGA:
-                Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_ITEM, NULL, -1);
-                break;
-            default:
-                break;
+            if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+            mobj_t* mo = (mobj_t*)th;
+            if (!(mo->flags & MF_SPECIAL)) continue;
+
+            switch (mo->sprite)
+            {
+                case SPR_BKEY: case SPR_BSKU:
+                    Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_bluecard);
+                    break;
+                case SPR_RKEY: case SPR_RSKU:
+                    Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_redcard);
+                    break;
+                case SPR_YKEY: case SPR_YSKU:
+                    Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_KEY, NULL, it_yellowcard);
+                    break;
+                case SPR_SGN2: case SPR_MGUN: case SPR_LAUN: case SPR_PLAS: case SPR_BFUG:
+                case SPR_SOUL: case SPR_MEGA:
+                    Bot_AddWaypoint(mo->x, mo->y, mo->z, WP_ITEM, NULL, -1);
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
@@ -324,12 +406,70 @@ static int Bot_FindNearestWaypoint(fixed_t x, fixed_t y, fixed_t z, boolean chec
         }
     }
 
-    // Fallback if LOS fails
     if (best == -1 && check_los) return Bot_FindNearestWaypoint(x, y, z, false);
     return best;
 }
 
-// BFS shortest path on waypoint graph
+// Dijkstra path solver that checks if a path exists between two nodes without altering bot state
+static boolean Bot_QueryPath(int start_wp, int goal_wp, player_t* player, int* out_dist)
+{
+    if (start_wp < 0 || goal_wp < 0 || start_wp >= bot_num_wp || goal_wp >= bot_num_wp)
+        return false;
+    if (start_wp == goal_wp)
+    {
+        if (out_dist) *out_dist = 0;
+        return true;
+    }
+
+    int dist[MAX_BOT_WAYPOINTS];
+    boolean visited[MAX_BOT_WAYPOINTS];
+
+    for (int i = 0; i < bot_num_wp; i++)
+    {
+        dist[i] = 999999;
+        visited[i] = false;
+    }
+
+    dist[start_wp] = 0;
+
+    for (int count = 0; count < bot_num_wp; count++)
+    {
+        int u = -1;
+        int min_d = 999999;
+        for (int i = 0; i < bot_num_wp; i++)
+        {
+            if (!visited[i] && dist[i] < min_d)
+            {
+                min_d = dist[i];
+                u = i;
+            }
+        }
+
+        if (u == -1 || u == goal_wp) break;
+        visited[u] = true;
+
+        for (int e = 0; e < bot_wp[u].num_edges; e++)
+        {
+            int v = bot_wp[u].edges[e];
+            if (visited[v]) continue;
+
+            if (bot_wp[v].type == WP_DOOR && !Bot_HasKey(player, bot_wp[v].required_key))
+                continue;
+
+            int cost = bot_wp[u].edge_dist[e] + bot_wp[v].visits * 30;
+            if (dist[u] + cost < dist[v])
+            {
+                dist[v] = dist[u] + cost;
+            }
+        }
+    }
+
+    if (dist[goal_wp] >= 999999) return false;
+    if (out_dist) *out_dist = dist[goal_wp];
+    return true;
+}
+
+// Dijkstra shortest path on waypoint graph; updates bot_path_cache and resets step to 0
 static boolean Bot_FindPath(int start_wp, int goal_wp, player_t* player)
 {
     if (start_wp < 0 || goal_wp < 0 || start_wp >= bot_num_wp || goal_wp >= bot_num_wp)
@@ -344,40 +484,47 @@ static boolean Bot_FindPath(int start_wp, int goal_wp, player_t* player)
 
     int dist[MAX_BOT_WAYPOINTS];
     int prev[MAX_BOT_WAYPOINTS];
-    int queue[MAX_BOT_WAYPOINTS];
-    int qhead = 0, qtail = 0;
+    boolean visited[MAX_BOT_WAYPOINTS];
 
     for (int i = 0; i < bot_num_wp; i++)
     {
         dist[i] = 999999;
         prev[i] = -1;
+        visited[i] = false;
     }
 
     dist[start_wp] = 0;
-    queue[qtail++] = start_wp;
 
-    while (qhead < qtail)
+    for (int count = 0; count < bot_num_wp; count++)
     {
-        int u = queue[qhead++];
-        if (u == goal_wp) break;
+        int u = -1;
+        int min_d = 999999;
+        for (int i = 0; i < bot_num_wp; i++)
+        {
+            if (!visited[i] && dist[i] < min_d)
+            {
+                min_d = dist[i];
+                u = i;
+            }
+        }
+
+        if (u == -1 || u == goal_wp) break;
+        visited[u] = true;
 
         for (int e = 0; e < bot_wp[u].num_edges; e++)
         {
             int v = bot_wp[u].edges[e];
-            int cost = bot_wp[u].edge_dist[e];
+            if (visited[v]) continue;
 
-            // If waypoint is locked door and player has no key, cannot pass
+            // Check if destination is a locked door player cannot open
             if (bot_wp[v].type == WP_DOOR && !Bot_HasKey(player, bot_wp[v].required_key))
                 continue;
 
-            // Prefer less visited nodes
-            cost += bot_wp[v].visits * 50;
-
+            int cost = bot_wp[u].edge_dist[e] + bot_wp[v].visits * 30;
             if (dist[u] + cost < dist[v])
             {
                 dist[v] = dist[u] + cost;
                 prev[v] = u;
-                queue[qtail++] = v;
             }
         }
     }
@@ -401,6 +548,14 @@ static boolean Bot_FindPath(int start_wp, int goal_wp, player_t* player)
         bot_path_cache[bot_path_len++] = temp[i];
     }
     bot_path_step = 0;
+    if (bot_path_len > 1 && player && player->mo)
+    {
+        fixed_t d0 = P_AproxDistance(player->mo->x - bot_wp[bot_path_cache[0]].x, player->mo->y - bot_wp[bot_path_cache[0]].y);
+        if (d0 < 56*FRACUNIT)
+        {
+            bot_path_step = 1;
+        }
+    }
     return true;
 }
 
@@ -456,17 +611,18 @@ static void Bot_SelectWeapon(ticcmd_t* cmd, player_t* player, fixed_t dist)
     }
 }
 
-// 3D vertical pitch aim
-static void Bot_AimPitch(player_t* player, mobj_t* target, fixed_t dist)
+// Vertical 3D freelook pitch aiming
+static void Bot_AimPitch(player_t* player, mobj_t* target, fixed_t dist_horiz)
 {
-    if (!mlook) return;
-    fixed_t dz = (target->z + (target->height >> 1)) - player->viewz;
-    int dxy = (int)(dist >> FRACBITS);
-    if (dxy <= 0) dxy = 1;
+    if (!mlook || dist_horiz < 32*FRACUNIT) return;
 
-    int target_pitch = (int)(((long long)dz * 160) / ((long long)dxy * FRACUNIT));
-    if (target_pitch > 90) target_pitch = 90;
-    if (target_pitch < -100) target_pitch = -100;
+    fixed_t eye_z = player->mo->z + (player->viewheight);
+    fixed_t target_z = target->z + (target->height / 2);
+    fixed_t dz = target_z - eye_z;
+
+    int target_pitch = (int)(dz / (dist_horiz >> 6));
+    if (target_pitch > 60) target_pitch = 60;
+    if (target_pitch < -60) target_pitch = -60;
 
     if (lookdir < target_pitch)
     {
@@ -480,52 +636,6 @@ static void Bot_AimPitch(player_t* player, mobj_t* target, fixed_t dist)
     }
 }
 
-// Check lines immediately in front of the bot and press USE if door/switch
-static boolean Bot_CheckUseLines(player_t* player, ticcmd_t* cmd)
-{
-    int angle = player->mo->angle >> ANGLETOFINESHIFT;
-    fixed_t fx = player->mo->x + (64 * finecosine[angle]);
-    fixed_t fy = player->mo->y + (64 * finesine[angle]);
-
-    for (int i = 0; i < numlines; i++)
-    {
-        line_t* li = &lines[i];
-        if (li->special == 0) continue;
-
-        fixed_t mx = (li->v1->x + li->v2->x) / 2;
-        fixed_t my = (li->v1->y + li->v2->y) / 2;
-        fixed_t d = P_AproxDistance(player->mo->x - mx, player->mo->y - my);
-
-        if (d < 80*FRACUNIT)
-        {
-            if (Bot_IsExitLine(li) || Bot_IsDoorClosed(li) || li->special == 1 || li->special == 11)
-            {
-                angle_t face_ang = R_PointToAngle2(player->mo->x, player->mo->y, mx, my);
-                cmd->angleturn = (short)((face_ang - player->mo->angle) >> 16);
-                cmd->buttons |= BT_USE;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Find uncollected key that is needed
-static int Bot_FindNeededKeyWaypoint(player_t* player)
-{
-    for (int i = 0; i < bot_num_wp; i++)
-    {
-        if (bot_wp[i].type == WP_KEY)
-        {
-            if (!Bot_HasKey(player, bot_wp[i].required_key))
-            {
-                return i;
-            }
-        }
-    }
-    return -1;
-}
-
 // Main bot decision maker called every tic
 void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
 {
@@ -537,7 +647,7 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
     // 1. Respawn if dead
     if (player->playerstate == PST_DEAD)
     {
-        cmd->buttons |= BT_USE;
+        if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
         return;
     }
 
@@ -577,24 +687,46 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
             cmd->buttons |= BT_ATTACK;
         }
 
-        // Tactical Movement: Strafe & Distance Control
+        // Tactical Movement: Strafe & Distance Control with Whisker Wall Detection
         if (++bot_strafe_timer > 30)
         {
             bot_strafe_timer = 0;
             bot_strafe_dir = -bot_strafe_dir;
         }
 
-        cmd->sidemove = (signed char)(bot_strafe_dir * 35);
+        int s_an = (player->mo->angle + (bot_strafe_dir > 0 ? -ANG90 : ANG90)) >> ANGLETOFINESHIFT;
+        fixed_t s_x = player->mo->x + FixedMul(32*FRACUNIT, finecosine[s_an]);
+        fixed_t s_y = player->mo->y + FixedMul(32*FRACUNIT, finesine[s_an]);
+        if (!P_CheckPosition(player->mo, s_x, s_y))
+        {
+            bot_strafe_dir = -bot_strafe_dir;
+            bot_strafe_timer = 0;
+            cmd->sidemove = 0;
+        }
+        else
+        {
+            cmd->sidemove = (signed char)(bot_strafe_dir * 30);
+        }
 
         if (dist < 180*FRACUNIT)
         {
             // Backpedal from close melee enemies
             cmd->forwardmove = -BOT_MAXMOVE;
         }
-        else if (dist > 280*FRACUNIT)
+        else
         {
-            // Close the gap to attack
-            cmd->forwardmove = 35;
+            // Advance towards threat if clear ahead
+            int f_an = player->mo->angle >> ANGLETOFINESHIFT;
+            fixed_t f_x = player->mo->x + FixedMul(36*FRACUNIT, finecosine[f_an]);
+            fixed_t f_y = player->mo->y + FixedMul(36*FRACUNIT, finesine[f_an]);
+            if (P_CheckPosition(player->mo, f_x, f_y))
+            {
+                cmd->forwardmove = (dist > 280*FRACUNIT) ? 35 : 15;
+            }
+            else
+            {
+                cmd->sidemove = (signed char)(bot_strafe_dir * 35);
+            }
         }
 
         return;
@@ -607,113 +739,278 @@ void Bot_BuildTiccmd(ticcmd_t* cmd, player_t* player)
         else if (lookdir < 0) lookdir = (lookdir < -4) ? lookdir + 4 : 0;
     }
 
-    // 3. Check for doors/switches to activate directly in front
-    if (Bot_CheckUseLines(player, cmd))
-    {
-        return;
-    }
+    // 3. High-Level Path Planning (Decoupled from per-frame execution)
+    int cur_nearest = Bot_FindNearestWaypoint(player->mo->x, player->mo->y, player->mo->z, true);
 
-    // 4. Determine High-Level Goal Waypoint
-    int goal_wp = -1;
+    int cur_keys = (player->cards[it_bluecard] ? 1 : 0) | (player->cards[it_redcard] ? 2 : 0) | (player->cards[it_yellowcard] ? 4 : 0);
+    boolean keys_changed = (cur_keys != bot_last_keys);
+    bot_last_keys = cur_keys;
 
-    // Check if we need an uncollected key
-    int key_wp = Bot_FindNeededKeyWaypoint(player);
-    if (key_wp >= 0)
+    boolean need_replan = (bot_path_len == 0 ||
+                           bot_path_step >= bot_path_len ||
+                           keys_changed ||
+                           bot_stuck_tics > 30 ||
+                           ++bot_replan_timer > 150);
+
+    if (need_replan)
     {
-        goal_wp = key_wp;
-    }
-    else if (bot_exit_wp >= 0)
-    {
-        // Head for Exit!
-        goal_wp = bot_exit_wp;
-    }
-    else
-    {
-        // Fallback: search for least visited node
-        int min_vis = 999999;
-        for (int i = 0; i < bot_num_wp; i++)
+        bot_replan_timer = 0;
+        int goal_wp = -1;
+
+        // Strategy A: Check if exit is currently reachable
+        if (bot_exit_wp >= 0 && Bot_QueryPath(cur_nearest, bot_exit_wp, player, NULL))
         {
-            if (bot_wp[i].visits < min_vis)
+            goal_wp = bot_exit_wp;
+        }
+        else
+        {
+            // Strategy B: Exit blocked (likely locked door). Find nearest reachable uncollected key!
+            int best_key = -1;
+            int best_key_dist = 999999;
+
+            for (int k = 0; k < bot_num_wp; k++)
             {
-                min_vis = bot_wp[i].visits;
-                goal_wp = i;
+                if (bot_wp[k].type == WP_KEY && !Bot_HasKey(player, bot_wp[k].required_key))
+                {
+                    int k_dist = 0;
+                    if (Bot_QueryPath(cur_nearest, k, player, &k_dist))
+                    {
+                        if (k_dist < best_key_dist)
+                        {
+                            best_key_dist = k_dist;
+                            best_key = k;
+                        }
+                    }
+                }
             }
+
+            if (best_key >= 0)
+            {
+                goal_wp = best_key;
+            }
+            else
+            {
+                // Strategy C: Explore least-visited reachable node
+                int min_vis = 999999;
+                for (int i = 0; i < bot_num_wp; i++)
+                {
+                    if (bot_wp[i].type == WP_DOOR && !Bot_HasKey(player, bot_wp[i].required_key))
+                        continue;
+
+                    if (bot_wp[i].visits < min_vis && Bot_QueryPath(cur_nearest, i, player, NULL))
+                    {
+                        min_vis = bot_wp[i].visits;
+                        goal_wp = i;
+                    }
+                }
+            }
+        }
+
+        if (goal_wp < 0 && bot_num_wp > 0) goal_wp = 0;
+
+        if (goal_wp >= 0)
+        {
+            bot_current_target_wp = goal_wp;
+            Bot_FindPath(cur_nearest, goal_wp, player);
         }
     }
 
-    if (goal_wp < 0 && bot_num_wp > 0) goal_wp = 0;
-    if (goal_wp < 0) return;
-
-    // 5. Navigate Path to Goal
-    int cur_nearest = Bot_FindNearestWaypoint(player->mo->x, player->mo->y, player->mo->z, true);
-
-    if (goal_wp != bot_current_target_wp || bot_path_len == 0 || bot_path_step >= bot_path_len)
-    {
-        bot_current_target_wp = goal_wp;
-        Bot_FindPath(cur_nearest, goal_wp, player);
-    }
-
-    // Identify next waypoint coordinate
-    fixed_t tx = bot_wp[goal_wp].x;
-    fixed_t ty = bot_wp[goal_wp].y;
+    // 4. Identify Next Waypoint in Path
+    fixed_t tx = player->mo->x;
+    fixed_t ty = player->mo->y;
+    int cur_target_wp = -1;
 
     if (bot_path_len > 0 && bot_path_step < bot_path_len)
     {
-        int wp_idx = bot_path_cache[bot_path_step];
-        tx = bot_wp[wp_idx].x;
-        ty = bot_wp[wp_idx].y;
+        cur_target_wp = bot_path_cache[bot_path_step];
+        tx = bot_wp[cur_target_wp].x;
+        ty = bot_wp[cur_target_wp].y;
 
         fixed_t d_wp = P_AproxDistance(player->mo->x - tx, player->mo->y - ty);
-        if (d_wp < 56*FRACUNIT)
+
+        // Check if current waypoint reached
+        fixed_t reach_dist = (bot_wp[cur_target_wp].type == WP_DOOR) ? 64*FRACUNIT : 48*FRACUNIT;
+        if (d_wp < reach_dist)
         {
-            bot_wp[wp_idx].visits++;
+            bot_wp[cur_target_wp].visits++;
             bot_path_step++;
             if (bot_path_step < bot_path_len)
             {
-                wp_idx = bot_path_cache[bot_path_step];
-                tx = bot_wp[wp_idx].x;
-                ty = bot_wp[wp_idx].y;
+                cur_target_wp = bot_path_cache[bot_path_step];
+                tx = bot_wp[cur_target_wp].x;
+                ty = bot_wp[cur_target_wp].y;
             }
         }
+    }
+    else if (bot_current_target_wp >= 0 && bot_current_target_wp < bot_num_wp)
+    {
+        tx = bot_wp[bot_current_target_wp].x;
+        ty = bot_wp[bot_current_target_wp].y;
+    }
 
-        // If approaching a door or exit waypoint, prepare to USE
-        if ((bot_wp[wp_idx].type == WP_DOOR || bot_wp[wp_idx].type == WP_EXIT) && d_wp < 80*FRACUNIT)
+    boolean facing_interaction = false;
+
+    // 5. Door and Exit Switch Handling
+    if (cur_target_wp >= 0)
+    {
+        fixed_t d_targ = P_AproxDistance(player->mo->x - bot_wp[cur_target_wp].x, player->mo->y - bot_wp[cur_target_wp].y);
+
+        if (bot_wp[cur_target_wp].type == WP_DOOR && d_targ < 96*FRACUNIT)
         {
-            cmd->buttons |= BT_USE;
+            if (Bot_HasKey(player, bot_wp[cur_target_wp].required_key))
+            {
+                // Face door and pulse USE
+                angle_t door_ang = R_PointToAngle2(player->mo->x, player->mo->y, bot_wp[cur_target_wp].x, bot_wp[cur_target_wp].y);
+                cmd->angleturn = (short)((door_ang - player->mo->angle) >> 16);
+                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
+                facing_interaction = true;
+            }
+        }
+        else if (bot_wp[cur_target_wp].type == WP_EXIT && d_targ < 72*FRACUNIT)
+        {
+            // Face exit switch line center and pulse USE
+            if (bot_wp[cur_target_wp].line)
+            {
+                line_t* el = bot_wp[cur_target_wp].line;
+                fixed_t ex = (el->v1->x + el->v2->x) / 2;
+                fixed_t ey = (el->v1->y + el->v2->y) / 2;
+                angle_t exit_ang = R_PointToAngle2(player->mo->x, player->mo->y, ex, ey);
+                cmd->angleturn = (short)((exit_ang - player->mo->angle) >> 16);
+                facing_interaction = true;
+            }
+            if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
         }
     }
 
-    // 6. Steering & Movement towards target
-    angle_t desired_ang = R_PointToAngle2(player->mo->x, player->mo->y, tx, ty);
-    int diff = (int)(desired_ang - player->mo->angle);
+    // Also check immediate proximity (64 units) for any closed unlocked doors to tap
+    for (int i = 0; i < numlines; i++)
+    {
+        line_t* li = &lines[i];
+        if (li->special == 0) continue;
 
-    short turn = (short)(diff >> 16);
-    if (turn > 1200) turn = 1200;
-    if (turn < -1200) turn = -1200;
-    cmd->angleturn = turn;
-    cmd->forwardmove = BOT_MAXMOVE;
+        fixed_t lmx = (li->v1->x + li->v2->x) / 2;
+        fixed_t lmy = (li->v1->y + li->v2->y) / 2;
+        fixed_t ld = P_AproxDistance(player->mo->x - lmx, player->mo->y - lmy);
 
-    // 7. Stuck Detection & Obstacle Avoidance
+        if (ld < 68*FRACUNIT)
+        {
+            if (Bot_IsDoor(li) && Bot_IsDoorClosed(li) && Bot_HasKey(player, Bot_DoorRequiredKey(li)))
+            {
+                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
+            }
+            else if (Bot_IsExitLine(li))
+            {
+                if ((gametic & 2) == 0) cmd->buttons |= BT_USE;
+            }
+        }
+    }
+
+    // 6. Steering towards target coordinate
+    if (!facing_interaction)
+    {
+        angle_t desired_ang = R_PointToAngle2(player->mo->x, player->mo->y, tx, ty);
+        int diff = (int)(desired_ang - player->mo->angle);
+
+        short turn = (short)(diff >> 16);
+        if (turn > 1400) turn = 1400;
+        if (turn < -1400) turn = -1400;
+        cmd->angleturn = turn;
+    }
+
+    // 7. Multi-Whisker Obstacle Avoidance (P_CheckPosition)
+    int an = player->mo->angle >> ANGLETOFINESHIFT;
+    fixed_t fwd_x = player->mo->x + FixedMul(36*FRACUNIT, finecosine[an]);
+    fixed_t fwd_y = player->mo->y + FixedMul(36*FRACUNIT, finesine[an]);
+
+    boolean front_clear = P_CheckPosition(player->mo, fwd_x, fwd_y);
+
+    if (front_clear)
+    {
+        // Clear ahead: run full speed forward
+        cmd->forwardmove = BOT_MAXMOVE;
+    }
+    else
+    {
+        // Obstacle ahead: test diagonal whisker feelers
+        int an_l = (player->mo->angle + ANG45) >> ANGLETOFINESHIFT;
+        int an_r = (player->mo->angle - ANG45) >> ANGLETOFINESHIFT;
+
+        fixed_t left_x = player->mo->x + FixedMul(32*FRACUNIT, finecosine[an_l]);
+        fixed_t left_y = player->mo->y + FixedMul(32*FRACUNIT, finesine[an_l]);
+
+        fixed_t right_x = player->mo->x + FixedMul(32*FRACUNIT, finecosine[an_r]);
+        fixed_t right_y = player->mo->y + FixedMul(32*FRACUNIT, finesine[an_r]);
+
+        boolean left_clear = P_CheckPosition(player->mo, left_x, left_y);
+        boolean right_clear = P_CheckPosition(player->mo, right_x, right_y);
+
+        if (left_clear && !right_clear)
+        {
+            // Steer & strafe left around obstacle
+            cmd->forwardmove = 30;
+            cmd->sidemove = -35;
+            cmd->angleturn += 600;
+        }
+        else if (right_clear && !left_clear)
+        {
+            // Steer & strafe right around obstacle
+            cmd->forwardmove = 30;
+            cmd->sidemove = 35;
+            cmd->angleturn -= 600;
+        }
+        else if (left_clear && right_clear)
+        {
+            // Both sides open: choose side closer to target
+            fixed_t dl = P_AproxDistance(left_x - tx, left_y - ty);
+            fixed_t dr = P_AproxDistance(right_x - tx, right_y - ty);
+            if (dl < dr)
+            {
+                cmd->forwardmove = 25;
+                cmd->sidemove = -35;
+                cmd->angleturn += 500;
+            }
+            else
+            {
+                cmd->forwardmove = 25;
+                cmd->sidemove = 35;
+                cmd->angleturn -= 500;
+            }
+        }
+        else
+        {
+            // Corner or door in front:
+            if (cur_target_wp >= 0 && bot_wp[cur_target_wp].type == WP_DOOR)
+            {
+                cmd->forwardmove = 30; // Keep pushing through opening door
+            }
+            else
+            {
+                cmd->forwardmove = -15;
+                cmd->sidemove = (signed char)(bot_strafe_dir * 35);
+                cmd->angleturn = 800;
+            }
+        }
+    }
+
+    // 8. Anti-Stuck Maneuver (no generic wall grunting)
     fixed_t dist_moved = P_AproxDistance(player->mo->x - bot_last_x, player->mo->y - bot_last_y);
     bot_last_x = player->mo->x;
     bot_last_y = player->mo->y;
 
-    if (dist_moved < 12*FRACUNIT)
+    if (dist_moved < 8*FRACUNIT)
     {
-        bot_stuck_tics++;
-        if (bot_stuck_tics > 15)
+        if (++bot_stuck_tics > 15)
         {
-            // Unstick maneuver: back up, strafe, try pressing use
+            // Back up and strafe away from obstacle
             cmd->forwardmove = -BOT_MAXMOVE;
             cmd->sidemove = (signed char)(bot_strafe_dir * BOT_MAXMOVE);
-            cmd->buttons |= BT_USE;
 
             if (bot_stuck_tics > 35)
             {
                 bot_strafe_dir = -bot_strafe_dir;
-                cmd->angleturn = 1600;
+                cmd->angleturn = 2200;
+                bot_path_step++; // Advance past stuck node
                 bot_stuck_tics = 0;
-                bot_path_step++; // skip blocked node
             }
         }
     }
