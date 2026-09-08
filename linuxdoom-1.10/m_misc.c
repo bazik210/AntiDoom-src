@@ -429,6 +429,10 @@ void M_LoadDefaults (void)
     /* The Win32 port uses the full 320-pixel playfield with the status bar. */
     screenblocks = 10;
 #endif
+    if (M_CheckParm("-nomlook")) mlook = 0;
+    if (M_CheckParm("-mlook")) mlook = 1;
+    if (M_CheckParm("-nomenumouse")) menu_mouse = 0;
+    if (M_CheckParm("-menumouse")) menu_mouse = 1;
 }
 
 

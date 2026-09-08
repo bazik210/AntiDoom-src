@@ -604,7 +604,9 @@ void IdentifyVersion (void)
     doomwaddir = getenv("DOOMWADDIR");
     if (!doomwaddir)
     {
-        if (access("game/doom2.wad", 0) == 0 || access("game/doom.wad", 0) == 0)
+        if (access("wad/doom2.wad", 0) == 0 || access("wad/doom.wad", 0) == 0)
+            doomwaddir = "wad";
+        else if (access("game/doom2.wad", 0) == 0 || access("game/doom.wad", 0) == 0)
             doomwaddir = "game";
         else
             doomwaddir = ".";
@@ -685,6 +687,39 @@ void IdentifyVersion (void)
 	D_AddFile (DEVMAPS"cdata/pnames.lmp");
 	strcpy (basedefault,DEVDATA"default.cfg");
 	return;
+    }
+
+    int iwad_param = M_CheckParm("-iwad");
+    if (iwad_param && iwad_param < myargc - 1)
+    {
+        char *custom_iwad = myargv[iwad_param + 1];
+        if (access(custom_iwad, 0) == 0)
+        {
+            char lower[256];
+            int k;
+            for (k = 0; k < sizeof(lower) - 1 && custom_iwad[k]; k++) {
+                char c = custom_iwad[k];
+                if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+                lower[k] = c;
+            }
+            lower[k] = 0;
+
+            if (strstr(lower, "doom2") || strstr(lower, "plutonia") || strstr(lower, "tnt"))
+                gamemode = commercial;
+            else if (strstr(lower, "doomu"))
+                gamemode = retail;
+            else if (strstr(lower, "doom1"))
+                gamemode = shareware;
+            else
+                gamemode = registered;
+
+            D_AddFile(custom_iwad);
+            return;
+        }
+        else
+        {
+            printf("Warning: -iwad file '%s' not found!\n", custom_iwad);
+        }
     }
 
     if ( !access (doom2fwad,R_OK) )
@@ -1016,7 +1051,7 @@ void D_DoomMain (void)
     if (p && p < myargc-1)
     {
 	startskill = myargv[p+1][0]-'1';
-	autostart = true;
+	if (M_CheckParm("-autostart")) autostart = true;
     }
 
     p = M_CheckParm ("-episode");
