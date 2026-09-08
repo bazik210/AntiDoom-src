@@ -402,9 +402,13 @@ void M_LoadDefaults (void)
 		    }
 	    }
 	}
-		
+	
 	fclose (f);
     }
+#ifdef _WIN32
+    /* The Win32 port uses the full 320-pixel playfield with the status bar. */
+    screenblocks = 10;
+#endif
 }
 
 

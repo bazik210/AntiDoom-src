@@ -59,6 +59,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         return 0;
     case WM_KEYUP:
         ev.type = ev_keyup; ev.data1 = win_key(w); D_PostEvent(&ev); return 0;
+    case WM_KILLFOCUS:
+        ev.type = ev_keyup;
+        ev.data1 = KEY_RCTRL; D_PostEvent(&ev);
+        ev.data1 = KEY_RSHIFT; D_PostEvent(&ev);
+        ev.data1 = KEY_RALT; D_PostEvent(&ev);
+        ev.data1 = ' '; D_PostEvent(&ev);
+        ev.data1 = KEY_LEFTARROW; D_PostEvent(&ev);
+        ev.data1 = KEY_RIGHTARROW; D_PostEvent(&ev);
+        ev.data1 = KEY_UPARROW; D_PostEvent(&ev);
+        ev.data1 = KEY_DOWNARROW; D_PostEvent(&ev);
+        return 0;
     case WM_CLOSE:
         closing = true; ev.type = ev_keydown; ev.data1 = KEY_ESCAPE; D_PostEvent(&ev); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -70,6 +81,7 @@ void I_InitGraphics(void)
 {
     WNDCLASS wc;
     RECT r, work;
+    MONITORINFO mi;
     int p, w = 960, h = 600;
     char *s;
 
@@ -89,10 +101,16 @@ void I_InitGraphics(void)
     r.left = 0; r.top = 0; r.right = w; r.bottom = h;
     if (!fullscreen) AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
-    if (fullscreen) { w = work.right - work.left; h = work.bottom - work.top; }
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfo(MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY), &mi);
+    if (fullscreen) { w = mi.rcMonitor.right - mi.rcMonitor.left; h = mi.rcMonitor.bottom - mi.rcMonitor.top; }
+    else {
+        if (r.right-r.left > work.right-work.left) r.right = r.left + work.right-work.left;
+        if (r.bottom-r.top > work.bottom-work.top) r.bottom = r.top + work.bottom-work.top;
+    }
     win = CreateWindow("DoomWin32", "DOOM II - Win32 port", fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW,
-                       fullscreen ? work.left : work.left + ((work.right-work.left)-(r.right-r.left))/2,
-                       fullscreen ? work.top : work.top + ((work.bottom-work.top)-(r.bottom-r.top))/2,
+                       fullscreen ? mi.rcMonitor.left : work.left + ((work.right-work.left)-(r.right-r.left))/2,
+                       fullscreen ? mi.rcMonitor.top : work.top + ((work.bottom-work.top)-(r.bottom-r.top))/2,
                        fullscreen ? w : r.right-r.left, fullscreen ? h : r.bottom-r.top,
                        NULL, NULL, wc.hInstance, NULL);
     if (!win) I_Error("Could not create the Windows window");
@@ -138,14 +156,21 @@ void I_FinishUpdate(void)
                                         ((unsigned)palette[i+1] << 8) | palette[i+2];
         }
     GetClientRect(win, &r); outw = r.right; outh = r.bottom;
-    if ((long long)outw * SCREENHEIGHT < (long long)outh * SCREENWIDTH) {
-        left = 0; outw = r.right; outh = outw * SCREENHEIGHT / SCREENWIDTH; top = (r.bottom - outh) / 2;
+    if (M_CheckParm("-keepaspect")) {
+        if ((long long)outw * SCREENHEIGHT < (long long)outh * SCREENWIDTH) {
+            left = 0; outw = r.right; outh = outw * SCREENHEIGHT / SCREENWIDTH; top = (r.bottom - outh) / 2;
+        } else {
+            top = 0; outh = r.bottom; outw = outh * SCREENWIDTH / SCREENHEIGHT; left = (r.right - outw) / 2;
+        }
     } else {
-        top = 0; outh = r.bottom; outw = outh * SCREENWIDTH / SCREENHEIGHT; left = (r.right - outw) / 2;
+        left = 0; top = 0; outw = r.right; outh = r.bottom;
     }
-    PatBlt(dc, 0, 0, r.right, r.bottom, BLACKNESS);
     StretchDIBits(dc, left, top, outw, outh, 0, 0, SCREENWIDTH, SCREENHEIGHT,
                   rgb, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    if (top > 0) PatBlt(dc, 0, 0, r.right, top, BLACKNESS);
+    if (top + outh < r.bottom) PatBlt(dc, 0, top + outh, r.right, r.bottom - top - outh, BLACKNESS);
+    if (left > 0) PatBlt(dc, 0, top, left, outh, BLACKNESS);
+    if (left + outw < r.right) PatBlt(dc, left + outw, top, r.right - left - outw, outh, BLACKNESS);
 }
 
 void I_ReadScreen(byte *scr) { memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT); }
