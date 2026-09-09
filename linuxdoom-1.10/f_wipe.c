@@ -184,6 +184,10 @@ wipe_doMelt
     boolean	done = true;
 
     width/=2;
+    if (ticks <= 0)
+        return 0;
+    int step = (height > 200) ? 16 : 8;
+    int ramp = (height > 200) ? 32 : 16;
 
     while (ticks--)
     {
@@ -195,7 +199,7 @@ wipe_doMelt
 	    }
 	    else if (y[i] < height)
 	    {
-		dy = (y[i] < 16) ? y[i]+1 : 8;
+		dy = (y[i] < ramp) ? y[i]+1 : step;
 		if (y[i]+dy >= height) dy = height - y[i];
 		s = &((short *)wipe_scr_end)[i*height+y[i]];
 		d = &((short *)wipe_scr)[y[i]*width+i];
@@ -218,6 +222,10 @@ wipe_doMelt
 	    }
 	}
     }
+
+    done = true;
+    for (i = 0; i < width; i++)
+        if (y[i] < height) { done = false; break; }
 
     return done;
 

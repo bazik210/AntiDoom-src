@@ -41,6 +41,7 @@ rcsid[] = "$Id: g_game.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include "p_setup.h"
 #include "p_saveg.h"
 #include "p_tick.h"
+#include "p_interp.h"
 
 #include "d_main.h"
 
@@ -541,6 +542,7 @@ void G_DoLoadLevel (void)
     sendpause = sendsave = paused = false; 
     memset (mousebuttons, 0, sizeof(mousebuttons)); 
     memset (joybuttons, 0, sizeof(joybuttons)); 
+    P_ClearInterpolation ();
 } 
  
  
@@ -618,6 +620,7 @@ boolean G_Responder (event_t* ev)
     switch (ev->type) 
     { 
       case ev_keydown: 
+
 	if (ev->data1 == KEY_F10)
 	{
 	    bot_active = !bot_active;
@@ -1364,6 +1367,7 @@ void G_DoLoadGame (void)
     joyxmove = joyymove = 0;
     D_ResetTimer ();
     I_ResetMouse ();
+    P_ClearInterpolation ();
 } 
  
 

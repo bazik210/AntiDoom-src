@@ -195,6 +195,15 @@ void R_ExecuteSetViewSize (void);
 
 boolean wiping = false;
 
+// ====== UNCAPPED FPS INTERPOLATION ======
+int uncapped_fps = 1;              // 1 = smooth rendering, 0 = classic 35 FPS lock
+fixed_t interp_frac = 0;           // 0..FRACUNIT interpolation fraction between ticks
+static unsigned long long last_tic_time_us = 0;
+#define TIC_DURATION_US (1000000ULL / TICRATE)
+
+extern unsigned long long I_GetTimeMicro(void);
+extern void TryRunTics_NonBlocking(void);
+
 void D_Display (void)
 {
     static  boolean		viewactivestate = false;
@@ -245,12 +254,12 @@ void D_Display (void)
 	    break;
 	if (automapactive)
 	    AM_Drawer ();
-	if (wipe || (viewheight != 200 && fullscreen) )
+	if (wipe || (viewheight != SCREENHEIGHT && fullscreen) || oldgamestate == -1)
 	    redrawsbar = true;
 	if (inhelpscreensstate && !inhelpscreens)
 	    redrawsbar = true;              // just put away the help screen
-	ST_Drawer (viewheight == 200, redrawsbar );
-	fullscreen = viewheight == 200;
+	ST_Drawer (viewheight == SCREENHEIGHT, redrawsbar );
+	fullscreen = (viewheight == SCREENHEIGHT);
 	break;
 
       case GS_INTERMISSION:
@@ -288,7 +297,7 @@ void D_Display (void)
     }
 
     // see if the border needs to be updated to the screen
-    if (gamestate == GS_LEVEL && !automapactive && scaledviewwidth != 320)
+    if (gamestate == GS_LEVEL && !automapactive && scaledviewwidth != SCREENWIDTH)
     {
 	if (menuactive || menuactivestate || !viewactivestate)
 	    borderdrawcount = 3;
@@ -346,7 +355,8 @@ void D_Display (void)
 	done = wipe_ScreenWipe(wipe_Melt
 			       , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
 	I_UpdateNoBlit ();
-	M_Drawer ();                            // menu is drawn even on top of wipes
+	if (menuactive && !wiping)
+	    M_Drawer ();                            // only draw popup menu if not wiping
 	I_FinishUpdate ();                      // page flip or blit buffer
 	I_StartTic ();
 #ifndef SNDSERV
@@ -357,11 +367,17 @@ void D_Display (void)
 #endif
     } while (!done);
     wiping = false;
+    oldgamestate = -1;
+    if (gamestate == GS_LEVEL) {
+        ST_Drawer(viewheight == SCREENHEIGHT, true);
+        I_FinishUpdate();
+    }
     eventhead = eventtail = 0;
     I_CaptureMouse(true);
     I_ResetMouse();
     extern void D_ResetTimer(void);
     D_ResetTimer();
+    last_tic_time_us = I_GetTimeMicro();
     extern boolean level_weapon_ready;
     extern boolean prev_weapon_ready;
     if (gamestate == GS_LEVEL && !level_weapon_ready) {
@@ -397,6 +413,7 @@ void D_DoomLoop (void)
     }
 	
     I_InitGraphics ();
+    last_tic_time_us = I_GetTimeMicro();
 
     while (1)
     {
@@ -412,15 +429,43 @@ void D_DoomLoop (void)
 	    if (advancedemo)
 		D_DoAdvanceDemo ();
 	    M_Ticker ();
+	    last_tic_time_us = I_GetTimeMicro();
 	    G_Ticker ();
 	    gametic++;
 	    maketic++;
 	}
 	else
 	{
-	    TryRunTics (); // will run at least one tic
+	    if (uncapped_fps)
+	    {
+	        int pre_gametic = gametic;
+	        TryRunTics_NonBlocking();
+	        if (gametic != pre_gametic)
+	            last_tic_time_us = I_GetTimeMicro();
+	    }
+	    else
+	    {
+	        TryRunTics (); // classic blocking - waits for tic
+	    }
 	}
 		
+	// Calculate interpolation fraction for uncapped FPS
+	if (uncapped_fps && gamestate == GS_LEVEL && !paused && (netgame || !menuactive || demoplayback))
+	{
+	    unsigned long long now_us = I_GetTimeMicro();
+	    unsigned long long elapsed = now_us - last_tic_time_us;
+	    if (elapsed >= TIC_DURATION_US)
+	        interp_frac = FRACUNIT;
+	    else
+	        interp_frac = (fixed_t)(elapsed * FRACUNIT / TIC_DURATION_US);
+	}
+	else
+	{
+	    interp_frac = FRACUNIT;  // frozen simulation / paused / menu: exact latest state, no jitter
+	}
+
+
+
 	S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
 
 	// Update display, next frame, with current state.
@@ -1280,6 +1325,20 @@ void D_DoomMain (void)
 	}
 
     }
+
+    // Uncapped FPS command line overrides
+
+    if (M_CheckParm("-uncapped"))
+
+        uncapped_fps = 1;
+
+    if (M_CheckParm("-capped"))
+
+        uncapped_fps = 0;
+
+    I_Log("Uncapped FPS: %s\n", uncapped_fps ? "ON (smooth interpolation)" : "OFF (classic 35 FPS)");
+
+
 
     I_Log("\nDOOM II Win32 initialized successfully. Entering main loop.\n\n");
     D_DoomLoop ();  // never returns

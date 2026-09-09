@@ -39,6 +39,7 @@
 #define IDC_CHK_JUMP        124
 #define IDC_BTN_LANG        125
 #define IDC_CHK_SMOOTH      126
+#define IDC_CHK_UNCAPPED    127
 
 // Static Label IDs for dynamic translation
 #define IDC_LBL_IWAD        201
@@ -50,7 +51,7 @@
 #define IDC_LBL_EXTRA       207
 
 static HWND hIwadPath, hIwadPreset, hPwadPath;
-static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect, hChkSmooth;
+static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect, hChkSmooth, hChkUncapped;
 static HWND hChkBot, hChkMlook, hChkMenuMouse, hChkFast, hChkNoMonsters, hChkRespawn, hChkJUMP;
 static HWND hSkillCombo, hWarpEdit, hChkQuickStart, hExtraEdit, hChkCloseStart;
 static HWND hBtnLaunch, hBtnSave, hBtnExit, hIwadBrowse, hPwadBrowse, hBtnLang;
@@ -296,6 +297,7 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hChkSmooth, L"Сглаживание (Bilinear) (-smooth)");
         SetWindowTextW(hChkFullscreen, L"Полный экран (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Окно без рамок (-maximized)");
+        SetWindowTextW(hChkUncapped, L"Плавный FPS (Uncapped 144+) (-uncapped)");
 
         SetWindowTextW(hChkBot, L"Включить бота (-bot)");
         SetWindowTextW(hChkMlook, L"Обзор мышью (-mlook)");
@@ -330,6 +332,7 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hChkSmooth, L"Smooth Scaling (Bilinear) (-smooth)");
         SetWindowTextW(hChkFullscreen, L"Fullscreen Mode (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Borderless Window (-maximized)");
+        SetWindowTextW(hChkUncapped, L"Smooth FPS (Uncapped 144+) (-uncapped)");
 
         SetWindowTextW(hChkBot, L"Enable AI Bot (-bot)");
         SetWindowTextW(hChkMlook, L"Mouse Freelook (-mlook)");
@@ -410,6 +413,9 @@ static void SaveSettings(void)
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkSmooth, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Smooth", buf, INI_FILE);
 
+    swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkUncapped, BM_GETCHECK, 0, 0));
+    WritePrivateProfileStringW(L"Launcher", L"Uncapped", buf, INI_FILE);
+
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkBot, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Bot", buf, INI_FILE);
 
@@ -488,6 +494,7 @@ static void LoadSettings(void)
     SendMessageW(hChkMaximized, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Maximized", 0, INI_FILE), 0);
     SendMessageW(hChkKeepAspect, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"KeepAspect", 1, INI_FILE), 0);
     SendMessageW(hChkSmooth, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Smooth", 0, INI_FILE), 0);
+    SendMessageW(hChkUncapped, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Uncapped", 1, INI_FILE), 0);
 
     SendMessageW(hChkBot, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Bot", 0, INI_FILE), 0);
     SendMessageW(hChkMlook, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Mlook", 1, INI_FILE), 0);
@@ -635,6 +642,12 @@ static void LaunchGame(HWND hWnd)
     if (SendMessageW(hChkKeepAspect, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -keepaspect");
     if (SendMessageW(hChkSmooth, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -smooth");
 
+    if (SendMessageW(hChkUncapped, BM_GETCHECK, 0, 0)) {
+        wcscat(cmd, L" -uncapped");
+    } else {
+        wcscat(cmd, L" -capped");
+    }
+
     if (SendMessageW(hChkBot, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -bot");
     if (!SendMessageW(hChkMlook, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomlook");
     if (!SendMessageW(hChkMenuMouse, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomenumouse");
@@ -762,41 +775,42 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         hChkKeepAspect = CreateWindowW(L"BUTTON", L"Сохранять пропорции (-keepaspect)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 250, 240, 20, hWnd, (HMENU)IDC_CHK_KEEPASPECT, NULL, NULL);
         hChkSmooth = CreateWindowW(L"BUTTON", L"Сглаживание (Bilinear) (-smooth)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 250, 260, 20, hWnd, (HMENU)IDC_CHK_SMOOTH, NULL, NULL);
-        hChkFullscreen = CreateWindowW(L"BUTTON", L"Полный экран (-fullscreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 275, 230, 20, hWnd, (HMENU)IDC_CHK_FULLSCREEN, NULL, NULL);
-        hChkMaximized = CreateWindowW(L"BUTTON", L"Окно без рамок (-maximized)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 275, 260, 20, hWnd, (HMENU)IDC_CHK_MAXIMIZED, NULL, NULL);
+        hChkFullscreen = CreateWindowW(L"BUTTON", L"Полный экран (-fullscreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 274, 230, 20, hWnd, (HMENU)IDC_CHK_FULLSCREEN, NULL, NULL);
+        hChkMaximized = CreateWindowW(L"BUTTON", L"Окно без рамок (-maximized)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 274, 260, 20, hWnd, (HMENU)IDC_CHK_MAXIMIZED, NULL, NULL);
+        hChkUncapped = CreateWindowW(L"BUTTON", L"Плавный FPS (Uncapped 144+) (-uncapped)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 298, 320, 20, hWnd, (HMENU)IDC_CHK_UNCAPPED, NULL, NULL);
 
         // Gameplay / AI Section
-        hChkBot = CreateWindowW(L"BUTTON", L"Включить бота (-bot)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 308, 230, 20, hWnd, (HMENU)IDC_CHK_BOT, NULL, NULL);
-        hChkMlook = CreateWindowW(L"BUTTON", L"Обзор мышью (-mlook)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 308, 260, 20, hWnd, (HMENU)IDC_CHK_MLOOK, NULL, NULL);
+        hChkBot = CreateWindowW(L"BUTTON", L"Включить бота (-bot)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 330, 230, 20, hWnd, (HMENU)IDC_CHK_BOT, NULL, NULL);
+        hChkMlook = CreateWindowW(L"BUTTON", L"Обзор мышью (-mlook)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 330, 260, 20, hWnd, (HMENU)IDC_CHK_MLOOK, NULL, NULL);
 
-        hChkMenuMouse = CreateWindowW(L"BUTTON", L"Курсор мыши в меню (-menumouse)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 332, 245, 20, hWnd, (HMENU)IDC_CHK_MENUMOUSE, NULL, NULL);
-        hChkFast = CreateWindowW(L"BUTTON", L"Быстрые монстры (-fast)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 332, 260, 20, hWnd, (HMENU)IDC_CHK_FAST, NULL, NULL);
+        hChkMenuMouse = CreateWindowW(L"BUTTON", L"Курсор мыши в меню (-menumouse)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 354, 245, 20, hWnd, (HMENU)IDC_CHK_MENUMOUSE, NULL, NULL);
+        hChkFast = CreateWindowW(L"BUTTON", L"Быстрые монстры (-fast)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 354, 260, 20, hWnd, (HMENU)IDC_CHK_FAST, NULL, NULL);
 
-        hChkNoMonsters = CreateWindowW(L"BUTTON", L"Без монстров (-nomonsters)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 356, 230, 20, hWnd, (HMENU)IDC_CHK_NOMONSTERS, NULL, NULL);
-        hChkRespawn = CreateWindowW(L"BUTTON", L"Возрождение монстров (-respawn)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 356, 260, 20, hWnd, (HMENU)IDC_CHK_RESPAWN, NULL, NULL);
+        hChkNoMonsters = CreateWindowW(L"BUTTON", L"Без монстров (-nomonsters)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 378, 230, 20, hWnd, (HMENU)IDC_CHK_NOMONSTERS, NULL, NULL);
+        hChkRespawn = CreateWindowW(L"BUTTON", L"Возрождение монстров (-respawn)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 378, 260, 20, hWnd, (HMENU)IDC_CHK_RESPAWN, NULL, NULL);
 
-        hChkJUMP = CreateWindowW(L"BUTTON", L"Прыжок (Space) (-jump)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 380, 230, 20, hWnd, (HMENU)IDC_CHK_JUMP, NULL, NULL);
-        hChkQuickStart = CreateWindowW(L"BUTTON", L"Сразу в игру (минуя заставку)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 380, 260, 20, hWnd, (HMENU)IDC_CHK_QUICKSTART, NULL, NULL);
+        hChkJUMP = CreateWindowW(L"BUTTON", L"Прыжок (Space) (-jump)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 402, 230, 20, hWnd, (HMENU)IDC_CHK_JUMP, NULL, NULL);
+        hChkQuickStart = CreateWindowW(L"BUTTON", L"Сразу в игру (минуя заставку)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 402, 260, 20, hWnd, (HMENU)IDC_CHK_QUICKSTART, NULL, NULL);
 
         // Difficulty & Warp
-        hLblSkill = CreateWindowW(L"STATIC", L"Сложность:", WS_CHILD | WS_VISIBLE, 25, 412, 80, 18, hWnd, (HMENU)IDC_LBL_SKILL, NULL, NULL);
-        hSkillCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 110, 409, 245, 180, hWnd, (HMENU)IDC_SKILL_COMBO, NULL, NULL);
+        hLblSkill = CreateWindowW(L"STATIC", L"Сложность:", WS_CHILD | WS_VISIBLE, 25, 434, 80, 18, hWnd, (HMENU)IDC_LBL_SKILL, NULL, NULL);
+        hSkillCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 110, 431, 245, 180, hWnd, (HMENU)IDC_SKILL_COMBO, NULL, NULL);
         for (int i = 0; i < 5; i++)
             SendMessageW(hSkillCombo, CB_ADDSTRING, 0, (LPARAM)skill_list_ru[i]);
 
-        hLblWarp = CreateWindowW(L"STATIC", L"Карта (Warp):", WS_CHILD | WS_VISIBLE, 370, 412, 95, 18, hWnd, (HMENU)IDC_LBL_WARP, NULL, NULL);
-        hWarpEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 470, 409, 65, 24, hWnd, (HMENU)IDC_WARP_EDIT, NULL, NULL);
+        hLblWarp = CreateWindowW(L"STATIC", L"Карта (Warp):", WS_CHILD | WS_VISIBLE, 370, 434, 95, 18, hWnd, (HMENU)IDC_LBL_WARP, NULL, NULL);
+        hWarpEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 470, 431, 65, 24, hWnd, (HMENU)IDC_WARP_EDIT, NULL, NULL);
 
         // Extra args
-        hLblExtra = CreateWindowW(L"STATIC", L"Дополнительные параметры:", WS_CHILD | WS_VISIBLE, 25, 442, 250, 18, hWnd, (HMENU)IDC_LBL_EXTRA, NULL, NULL);
-        hExtraEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 462, 510, 24, hWnd, (HMENU)IDC_EXTRA_EDIT, NULL, NULL);
+        hLblExtra = CreateWindowW(L"STATIC", L"Дополнительные параметры:", WS_CHILD | WS_VISIBLE, 25, 464, 250, 18, hWnd, (HMENU)IDC_LBL_EXTRA, NULL, NULL);
+        hExtraEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 25, 484, 510, 24, hWnd, (HMENU)IDC_EXTRA_EDIT, NULL, NULL);
 
-        hChkCloseStart = CreateWindowW(L"BUTTON", L"Закрывать ланчер при запуске игры", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 494, 350, 20, hWnd, (HMENU)IDC_CHK_CLOSE_START, NULL, NULL);
+        hChkCloseStart = CreateWindowW(L"BUTTON", L"Закрывать ланчер при запуске игры", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 516, 350, 20, hWnd, (HMENU)IDC_CHK_CLOSE_START, NULL, NULL);
 
         // Buttons
-        hBtnLaunch = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 522, 510, 46, hWnd, (HMENU)IDC_BTN_LAUNCH, NULL, NULL);
-        hBtnSave = CreateWindowW(L"BUTTON", L"Сохранить настройки", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 576, 245, 30, hWnd, (HMENU)IDC_BTN_SAVE, NULL, NULL);
-        hBtnExit = CreateWindowW(L"BUTTON", L"Выход", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 290, 576, 245, 30, hWnd, (HMENU)IDC_BTN_EXIT, NULL, NULL);
+        hBtnLaunch = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 544, 510, 46, hWnd, (HMENU)IDC_BTN_LAUNCH, NULL, NULL);
+        hBtnSave = CreateWindowW(L"BUTTON", L"Сохранить настройки", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 25, 598, 245, 30, hWnd, (HMENU)IDC_BTN_SAVE, NULL, NULL);
+        hBtnExit = CreateWindowW(L"BUTTON", L"Выход", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 290, 598, 245, 30, hWnd, (HMENU)IDC_BTN_EXIT, NULL, NULL);
 
         EnumChildWindows(hWnd, SetFontCallback, 0);
 
@@ -988,7 +1002,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    RECT rc = {0, 0, 560, 625};
+    RECT rc = {0, 0, 560, 650};
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 
     int scrW = GetSystemMetrics(SM_CXSCREEN);

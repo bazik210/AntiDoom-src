@@ -29,6 +29,9 @@ rcsid[] = "$Id: p_tick.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 #include "p_local.h"
 
 #include "doomstat.h"
+#include "p_mobj.h"
+
+extern void P_MobjThinker(mobj_t*);
 
 
 int	leveltime;
@@ -124,6 +127,125 @@ void P_RunThinkers (void)
 
 
 //
+// Interpolation state storage for smooth uncapped rendering
+// without modifying struct sizes (100% savegame compatibility)
+//
+#include "p_interp.h"
+#include <stdint.h>
+#include <string.h>
+
+extern int uncapped_fps;
+extern int lookdir;
+
+#define MOBJ_INTERP_SIZE 4096
+#define MOBJ_INTERP_MASK (MOBJ_INTERP_SIZE - 1)
+
+typedef struct {
+    mobj_t* mobj;
+    fixed_t oldx;
+    fixed_t oldy;
+    fixed_t oldz;
+    angle_t oldangle;
+} mobj_interp_entry_t;
+
+static mobj_interp_entry_t mobj_interp_table[MOBJ_INTERP_SIZE];
+
+typedef struct {
+    fixed_t oldviewz;
+    int oldlookdir;
+} player_interp_entry_t;
+
+static player_interp_entry_t player_interp_table[MAXPLAYERS];
+
+void P_ClearInterpolation(void)
+{
+    int i;
+    memset(mobj_interp_table, 0, sizeof(mobj_interp_table));
+    memset(player_interp_table, 0, sizeof(player_interp_table));
+    for (i = 0; i < MAXPLAYERS; i++)
+    {
+        player_interp_table[i].oldviewz = players[i].viewz;
+        player_interp_table[i].oldlookdir = 0;
+    }
+}
+
+void P_SaveInterpolationState(void)
+{
+    thinker_t* th;
+    int i;
+    memset(mobj_interp_table, 0, sizeof(mobj_interp_table));
+    for (th = thinkercap.next; th != &thinkercap; th = th->next)
+    {
+        if (th->function.acp1 == (actionf_p1)P_MobjThinker)
+        {
+            mobj_t* mo = (mobj_t*)th;
+            uintptr_t h = (((uintptr_t)mo) >> 4) & MOBJ_INTERP_MASK;
+            int step = 0;
+            while (mobj_interp_table[h].mobj != NULL && mobj_interp_table[h].mobj != mo && step < 64)
+            {
+                h = (h + 1) & MOBJ_INTERP_MASK;
+                step++;
+            }
+            mobj_interp_table[h].mobj = mo;
+            mobj_interp_table[h].oldx = mo->x;
+            mobj_interp_table[h].oldy = mo->y;
+            mobj_interp_table[h].oldz = mo->z;
+            mobj_interp_table[h].oldangle = mo->angle;
+        }
+    }
+    for (i = 0; i < MAXPLAYERS; i++)
+    {
+        if (playeringame[i])
+        {
+            player_interp_table[i].oldviewz = players[i].viewz;
+            player_interp_table[i].oldlookdir = lookdir;
+        }
+    }
+}
+
+void P_GetMobjInterp(mobj_t* mo, fixed_t* oldx, fixed_t* oldy, fixed_t* oldz, angle_t* oldangle)
+{
+    if (mo)
+    {
+        uintptr_t h = (((uintptr_t)mo) >> 4) & MOBJ_INTERP_MASK;
+        int step = 0;
+        while (mobj_interp_table[h].mobj != NULL && step < 64)
+        {
+            if (mobj_interp_table[h].mobj == mo)
+            {
+                if (oldx) *oldx = mobj_interp_table[h].oldx;
+                if (oldy) *oldy = mobj_interp_table[h].oldy;
+                if (oldz) *oldz = mobj_interp_table[h].oldz;
+                if (oldangle) *oldangle = mobj_interp_table[h].oldangle;
+                return;
+            }
+            h = (h + 1) & MOBJ_INTERP_MASK;
+            step++;
+        }
+        if (oldx) *oldx = mo->x;
+        if (oldy) *oldy = mo->y;
+        if (oldz) *oldz = mo->z;
+        if (oldangle) *oldangle = mo->angle;
+    }
+}
+
+void P_GetPlayerInterp(player_t* player, fixed_t* oldviewz, int* oldlookdir)
+{
+    if (player)
+    {
+        int pnum = player - players;
+        if (pnum >= 0 && pnum < MAXPLAYERS)
+        {
+            if (oldviewz) *oldviewz = player_interp_table[pnum].oldviewz;
+            if (oldlookdir) *oldlookdir = player_interp_table[pnum].oldlookdir;
+            return;
+        }
+        if (oldviewz) *oldviewz = player->viewz;
+    }
+}
+
+
+//
 // P_Ticker
 //
 
@@ -133,7 +255,11 @@ void P_Ticker (void)
     
     // run the tic
     if (paused)
+    {
+	if (uncapped_fps)
+	    P_SaveInterpolationState();
 	return;
+    }
 		
     // pause if in menu and at least one tic has been run
     if ( !netgame
@@ -141,10 +267,16 @@ void P_Ticker (void)
 	 && !demoplayback
 	 && players[consoleplayer].viewz != 1)
     {
+	if (uncapped_fps)
+	    P_SaveInterpolationState();
 	return;
     }
     
 		
+    // Snapshot positions for interpolation before simulation step
+    if (uncapped_fps)
+        P_SaveInterpolationState();
+
     for (i=0 ; i<MAXPLAYERS ; i++)
 	if (playeringame[i])
 	    P_PlayerThink (&players[i]);

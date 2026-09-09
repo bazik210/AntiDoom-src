@@ -255,7 +255,20 @@ ticcmd_t emptycmd;
 ticcmd_t *I_BaseTiccmd(void) { return &emptycmd; }
 int I_GetHeapSize(void) { return mb_used * 1024 * 1024; }
 byte *I_ZoneBase(int *size) { *size = I_GetHeapSize(); return (byte*)malloc(*size); }
-int I_GetTime(void) { return (int)(GetTickCount64() * TICRATE / 1000); }
+int I_GetTime(void) { return (int)(GetTickCount64() * TICRATE / 1000); }
+// High-resolution timer for uncapped FPS interpolation
+static LARGE_INTEGER qpc_freq = {0};
+static int qpc_initialized = 0;
+unsigned long long I_GetTimeMicro(void)
+{
+    LARGE_INTEGER now;
+    if (!qpc_initialized) {
+        QueryPerformanceFrequency(&qpc_freq);
+        qpc_initialized = 1;
+    }
+    QueryPerformanceCounter(&now);
+    return (unsigned long long)(now.QuadPart * 1000000ULL / qpc_freq.QuadPart);
+}
 unsigned long long I_GetTimeMs(void) { return (unsigned long long)GetTickCount64(); }
 void I_Tactile(int on, int off, int total) { (void)on;(void)off;(void)total; }
 void I_Init(void) { I_InitSound(); }

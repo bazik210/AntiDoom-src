@@ -483,9 +483,26 @@ void R_ProjectSprite (mobj_t* thing)
     angle_t		ang;
     fixed_t		iscale;
     
-    // transform the origin point
-    tr_x = thing->x - viewx;
-    tr_y = thing->y - viewy;
+    // transform the origin point (with interpolation for uncapped FPS)
+    fixed_t draw_x, draw_y;
+    {
+	extern int uncapped_fps;
+	extern fixed_t interp_frac;
+	if (uncapped_fps && interp_frac < FRACUNIT)
+	{
+	    fixed_t oldx, oldy;
+	    P_GetMobjInterp(thing, &oldx, &oldy, NULL, NULL);
+	    draw_x = oldx + FixedMul(thing->x - oldx, interp_frac);
+	    draw_y = oldy + FixedMul(thing->y - oldy, interp_frac);
+	}
+	else
+	{
+	    draw_x = thing->x;
+	    draw_y = thing->y;
+	}
+    }
+    tr_x = draw_x - viewx;
+    tr_y = draw_y - viewy;
 	
     gxt = FixedMul(tr_x,viewcos); 
     gyt = -FixedMul(tr_y,viewsin);

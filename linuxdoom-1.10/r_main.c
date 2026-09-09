@@ -832,8 +832,20 @@ void R_SetupFrame (player_t* player)
     int		i;
     extern int mlook;
     extern int lookdir;
+    extern int uncapped_fps;
+    extern fixed_t interp_frac;
     static int last_centery = -1;
-    centery = viewheight/2 + (mlook ? lookdir : 0);
+
+    // Interpolate lookdir for smooth mouselook
+    int render_lookdir = lookdir;
+    if (uncapped_fps && interp_frac < FRACUNIT && mlook)
+    {
+	fixed_t dummy_vz;
+	int old_ld = lookdir;
+	P_GetPlayerInterp(player, &dummy_vz, &old_ld);
+	render_lookdir = old_ld + (int)((long long)(lookdir - old_ld) * interp_frac / FRACUNIT);
+    }
+    centery = viewheight/2 + (mlook ? render_lookdir : 0);
     centeryfrac = centery<<FRACBITS;
     if (centery != last_centery)
     {
@@ -848,12 +860,31 @@ void R_SetupFrame (player_t* player)
     }
     
     viewplayer = player;
-    viewx = player->mo->x;
-    viewy = player->mo->y;
-    viewangle = player->mo->angle + viewangleoffset;
-    extralight = player->extralight;
 
-    viewz = player->viewz;
+    if (uncapped_fps && interp_frac < FRACUNIT)
+    {
+	mobj_t *mo = player->mo;
+	fixed_t oldx, oldy, oldz;
+	angle_t oldangle;
+	fixed_t oldviewz;
+	int old_ld;
+	P_GetMobjInterp(mo, &oldx, &oldy, &oldz, &oldangle);
+	P_GetPlayerInterp(player, &oldviewz, &old_ld);
+	viewx = oldx + FixedMul(mo->x - oldx, interp_frac);
+	viewy = oldy + FixedMul(mo->y - oldy, interp_frac);
+	viewz = oldviewz + FixedMul(player->viewz - oldviewz, interp_frac);
+	// Angle interpolation (handles unsigned wrapping correctly)
+	int angle_delta = (int)(mo->angle - oldangle);
+	viewangle = oldangle + (angle_t)FixedMul(angle_delta, interp_frac) + viewangleoffset;
+    }
+    else
+    {
+	viewx = player->mo->x;
+	viewy = player->mo->y;
+	viewangle = player->mo->angle + viewangleoffset;
+	viewz = player->viewz;
+    }
+    extralight = player->extralight;
     
     viewsin = finesine[viewangle>>ANGLETOFINESHIFT];
     viewcos = finecosine[viewangle>>ANGLETOFINESHIFT];

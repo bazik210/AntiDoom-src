@@ -774,4 +774,131 @@ void TryRunTics (void)
 	if (gamestate == GS_LEVEL && wipegamestate != GS_LEVEL)
 	    break;
     }
+}
+//
+// TryRunTics_NonBlocking
+// Like TryRunTics but returns immediately if no tics are available.
+// Used for uncapped FPS: we render interpolated frames between game ticks.
+//
+void TryRunTics_NonBlocking (void)
+{
+    int		i;
+    int		lowtic;
+    int		entertic;
+    int		realtics;
+    int		availabletics;
+    int		counts;
+    
+    // get real tics		
+    entertic = I_GetTime ()/ticdup;
+    realtics = entertic - oldentertics;
+    
+    if (realtics <= 0)
+        return;  // No new tic yet - return for interpolated render
+    
+    oldentertics = entertic;
+    
+    // get available tics
+    NetUpdate ();
+	
+    lowtic = MAXINT;
+    for (i=0 ; i<doomcom->numnodes ; i++)
+        if (nodeingame[i] && nettics[i] < lowtic)
+            lowtic = nettics[i];
+    
+    availabletics = lowtic - gametic/ticdup;
+    
+    // decide how many tics to run
+    if (realtics < availabletics-1)
+        counts = realtics+1;
+    else if (realtics < availabletics)
+        counts = realtics;
+    else
+        counts = availabletics;
+    
+    if (counts < 1)
+        return;  // Nothing available - render interpolated frame
+    
+    frameon++;
+
+    if (!demoplayback)
+    {	
+        for (i=0 ; i<MAXPLAYERS ; i++)
+            if (playeringame[i])
+                break;
+        if (consoleplayer == i)
+        {
+            // the key player does not adapt
+        }
+        else
+        {
+            if (nettics[0] <= nettics[nodeforplayer[i]])
+            {
+                gametime--;
+            }
+            frameskip[frameon&3] = (oldnettics > nettics[nodeforplayer[i]]);
+            oldnettics = nettics[0];
+            if (frameskip[0] && frameskip[1] && frameskip[2] && frameskip[3])
+            {
+                skiptics = 1;
+            }
+        }
+    }// demoplayback
+
+    // wait for new tics if needed (but with timeout for uncapped)
+    while (lowtic < gametic/ticdup + counts)	
+    {
+        NetUpdate ();   
+        lowtic = MAXINT;
+        
+        for (i=0 ; i<doomcom->numnodes ; i++)
+            if (nodeingame[i] && nettics[i] < lowtic)
+                lowtic = nettics[i];
+        
+        if (lowtic < gametic/ticdup)
+            I_Error ("TryRunTics: lowtic < gametic");
+                        
+        // don't stay in here forever
+        if (I_GetTime ()/ticdup - entertic >= 20)
+        {
+            M_Ticker ();
+            return;
+        } 
+    }
+    
+    // run the count * ticdup tics
+    while (counts--)
+    {
+        for (i=0 ; i<ticdup ; i++)
+        {
+            if (gametic/ticdup > lowtic)
+                I_Error ("gametic>lowtic");
+            if (advancedemo)
+                D_DoAdvanceDemo ();
+            M_Ticker ();
+            G_Ticker ();
+            gametic++;
+            
+            // modify command for duplicated tics
+            if (i != ticdup-1)
+            {
+                ticcmd_t	*cmd;
+                int		buf;
+                int		j;
+                        
+                buf = (gametic/ticdup)%BACKUPTICS; 
+                for (j=0 ; j<MAXPLAYERS ; j++)
+                {
+                    cmd = &netcmds[j][buf];
+                    cmd->chatchar = 0;
+                    if (cmd->buttons & BT_SPECIAL)
+                        cmd->buttons = 0;
+                }
+            }
+        }
+        NetUpdate ();	// check for new console commands
+        extern gamestate_t wipegamestate;
+        if (gamestate == GS_LEVEL && wipegamestate != GS_LEVEL)
+            break;
+    }
 }

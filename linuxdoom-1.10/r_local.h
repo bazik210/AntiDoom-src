@@ -44,6 +44,7 @@
 #include "r_data.h"
 #include "r_things.h"
 #include "r_draw.h"
+#include "p_interp.h"
 
 #endif		// __R_LOCAL__
 //-----------------------------------------------------------------------------
