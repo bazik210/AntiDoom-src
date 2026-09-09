@@ -121,6 +121,7 @@ static int win_key(WPARAM key)
     case VK_F7: return KEY_F7; case VK_F8: return KEY_F8;
     case VK_F9: return KEY_F9; case VK_F10: return KEY_F10;
     case VK_F11: return KEY_F11; case VK_F12: return KEY_F12;
+    case VK_OEM_5: return '\\';
     default:
         if (key >= 'A' && key <= 'Z') return (int)(key - 'A' + 'a');
         if (key >= '0' && key <= '9') return (int)key;

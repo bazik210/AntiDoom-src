@@ -621,6 +621,22 @@ boolean G_Responder (event_t* ev)
     { 
       case ev_keydown: 
 
+	if (ev->data1 == '\\' || ev->data1 == 0xDC)
+	{
+	    extern int uncapped_fps;
+	    uncapped_fps = !uncapped_fps;
+	    players[consoleplayer].message = uncapped_fps ? "SMOOTH FPS: ON" : "SMOOTH FPS: OFF (35 FPS)";
+	    S_StartSound(NULL, sfx_swtchn);
+	    return true;
+	}
+	if (ev->data1 == KEY_BACKSPACE)
+	{
+	    extern int show_fps;
+	    show_fps = !show_fps;
+	    players[consoleplayer].message = show_fps ? "FPS DISPLAY: ON" : "FPS DISPLAY: OFF";
+	    S_StartSound(NULL, sfx_swtchn);
+	    return true;
+	}
 	if (ev->data1 == KEY_F10)
 	{
 	    bot_active = !bot_active;

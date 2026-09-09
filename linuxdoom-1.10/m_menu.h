@@ -55,6 +55,8 @@ void M_Init (void);
 void M_StartControlPanel (void);
 
 extern int menu_mouse;
+void M_WriteText (int x, int y, char *string);
+int M_StringWidth (char *string);
 
 
 

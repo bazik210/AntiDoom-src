@@ -195,14 +195,40 @@ void R_ExecuteSetViewSize (void);
 
 boolean wiping = false;
 
+extern unsigned long long I_GetTimeMicro(void);
+extern void TryRunTics_NonBlocking(void);
+
 // ====== UNCAPPED FPS INTERPOLATION ======
 int uncapped_fps = 1;              // 1 = smooth rendering, 0 = classic 35 FPS lock
+int show_fps = 0;                  // 1 = display FPS counter on HUD, 0 = off
+
+void D_DrawFPS (void)
+{
+    static int fps_count = 0;
+    static unsigned long long fps_last_time = 0;
+    static int displayed_fps = 0;
+    static char fps_str[32] = "FPS: 0";
+    
+    unsigned long long now = I_GetTimeMicro();
+    fps_count++;
+    if (fps_last_time == 0)
+    {
+        fps_last_time = now;
+    }
+    else if (now - fps_last_time >= 500000ULL)
+    {
+        displayed_fps = (int)((unsigned long long)fps_count * 1000000ULL / (now - fps_last_time));
+        fps_count = 0;
+        fps_last_time = now;
+        sprintf(fps_str, "FPS: %d", displayed_fps);
+    }
+    
+    int w = M_StringWidth(fps_str);
+    M_WriteText(BASE_WIDTH - w - 4, 4, fps_str);
+}
 fixed_t interp_frac = 0;           // 0..FRACUNIT interpolation fraction between ticks
 static unsigned long long last_tic_time_us = 0;
 #define TIC_DURATION_US (1000000ULL / TICRATE)
-
-extern unsigned long long I_GetTimeMicro(void);
-extern void TryRunTics_NonBlocking(void);
 
 void D_Display (void)
 {
@@ -237,6 +263,7 @@ void D_Display (void)
     // save the current screen if about to wipe
     if (gamestate != wipegamestate)
     {
+	I_Log("D_Display WIPE START: gamestate=%d wipegamestate=%d gametic=%d viewheight=%d scaledviewwidth=%d menuactive=%d\n", gamestate, wipegamestate, gametic, viewheight, scaledviewwidth, menuactive);
 	wipe = true;
 	wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
     }
@@ -284,6 +311,9 @@ void D_Display (void)
 
     if (gamestate == GS_LEVEL && gametic)
 	HU_Drawer ();
+
+    if (show_fps && gamestate == GS_LEVEL)
+	D_DrawFPS ();
     
     // clean up border stuff
     if (gamestate != oldgamestate && gamestate != GS_LEVEL)
@@ -326,17 +356,15 @@ void D_Display (void)
     }
 
 
-    // menus go directly to the screen
-    M_Drawer ();          // menu is drawn even on top of everything
-    NetUpdate ();         // send out any new accumulation
-
-
     // normal update
     if (!wipe)
     {
+	M_Drawer ();          // menu is drawn even on top of everything
+	NetUpdate ();         // send out any new accumulation
 	I_FinishUpdate ();              // page flip or blit buffer
 	return;
     }
+
     
     // wipe update
     wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
@@ -354,6 +382,7 @@ void D_Display (void)
 	wiping = true;
 	done = wipe_ScreenWipe(wipe_Melt
 			       , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
+	I_Log("Wipe step: tics=%d done=%d wiping=%d menuactive=%d\n", tics, done, wiping, menuactive);
 	I_UpdateNoBlit ();
 	if (menuactive && !wiping)
 	    M_Drawer ();                            // only draw popup menu if not wiping
@@ -366,6 +395,7 @@ void D_Display (void)
 	I_SubmitSound();
 #endif
     } while (!done);
+    I_Log("Wipe loop FINISHED: done=%d gamestate=%d wipegamestate=%d\n", done, gamestate, wipegamestate);
     wiping = false;
     oldgamestate = -1;
     if (gamestate == GS_LEVEL) {
@@ -1335,6 +1365,10 @@ void D_DoomMain (void)
     if (M_CheckParm("-capped"))
 
         uncapped_fps = 0;
+
+    if (M_CheckParm("-fps"))
+
+        show_fps = 1;
 
     I_Log("Uncapped FPS: %s\n", uncapped_fps ? "ON (smooth interpolation)" : "OFF (classic 35 FPS)");
 

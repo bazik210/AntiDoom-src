@@ -164,6 +164,7 @@ wipe_initMelt
 	if (y[i] > 0) y[i] = 0;
 	else if (y[i] == -16) y[i] = -15;
     }
+    I_Log("wipe_initMelt: width=%d height=%d y[0]=%d y[100]=%d y[200]=%d y[319]=%d\n", width, height, y[0], y[100], y[200], y[319]);
 
     return 0;
 }
@@ -226,6 +227,7 @@ wipe_doMelt
     done = true;
     for (i = 0; i < width; i++)
         if (y[i] < height) { done = false; break; }
+    I_Log("wipe_doMelt: ticks=%d done=%d y[0]=%d y[100]=%d y[200]=%d y[319]=%d\n", ticks, done, y[0], y[100], y[200], y[319]);
 
     return done;
 
@@ -237,6 +239,7 @@ wipe_exitMelt
   int	height,
   int	ticks )
 {
+    I_Log("wipe_exitMelt called: freeing y\n");
     Z_Free(y);
     return 0;
 }

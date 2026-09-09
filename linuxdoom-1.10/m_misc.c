@@ -194,6 +194,7 @@ extern int	novert;
 extern int	mlook;
 extern int	menu_mouse;
 extern int	uncapped_fps;
+extern int	show_fps;
 
 extern int	mousebfire;
 extern int	mousebstrafe;
@@ -296,6 +297,7 @@ default_t	defaults[] =
     {"key_jump",&key_jump, ' '},
     {"smooth_scaling",&smooth_scaling, 0},
     {"uncapped_fps",&uncapped_fps, 1},
+    {"show_fps",&show_fps, 0},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},

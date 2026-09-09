@@ -38,6 +38,8 @@ extern char*		wadfiles[MAXWADFILES];
 
 void D_AddFile (char *file);
 extern boolean wiping;
+extern int show_fps;
+extern int uncapped_fps;
 
 
 
