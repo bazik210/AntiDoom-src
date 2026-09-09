@@ -70,7 +70,11 @@ extern int		loopcount;
 #define LIGHTSEGSHIFT	         4
 
 #define MAXLIGHTSCALE		48
+#if SCREEN_MUL == 2
+#define LIGHTSCALESHIFT		13
+#else
 #define LIGHTSCALESHIFT		12
+#endif
 #define MAXLIGHTZ	       128
 #define LIGHTZSHIFT		20
 
