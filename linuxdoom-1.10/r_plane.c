@@ -49,14 +49,13 @@ planefunction_t		ceilingfunc;
 //
 
 // Here comes the obnoxious "visplane".
-#define MAXVISPLANES	512
+#define MAXVISPLANES	1024
 visplane_t		visplanes[MAXVISPLANES];
 visplane_t*		lastvisplane;
 visplane_t*		floorplane;
 visplane_t*		ceilingplane;
 
 // ?
-#define MAXOPENINGS	SCREENWIDTH*64
 short			openings[MAXOPENINGS];
 short*			lastopening;
 
@@ -128,15 +127,13 @@ R_MapPlane
     fixed_t	length;
     unsigned	index;
 	
-#ifdef RANGECHECK
     if (x2 < x1
-	|| x1<0
-	|| x2>=viewwidth
-	|| (unsigned)y>viewheight)
+	|| x1 < 0
+	|| x2 >= viewwidth
+	|| (unsigned)y >= viewheight)
     {
-	I_Error ("R_MapPlane: %i, %i at %i",x1,x2,y);
+	return;
     }
-#endif
 
     if (planeheight != cachedheight[y])
     {
@@ -254,6 +251,7 @@ R_FindPlane
     check->maxx = -1;
     
     memset (check->top,0xff,sizeof(check->top));
+    memset (check->bottom,0x00,sizeof(check->bottom));
 		
     return check;
 }
@@ -309,6 +307,9 @@ R_CheckPlane
 	return pl;		
     }
 	
+    if (lastvisplane - visplanes >= MAXVISPLANES)
+	return pl;
+
     // make a new visplane
     lastvisplane->height = pl->height;
     lastvisplane->picnum = pl->picnum;
@@ -319,6 +320,7 @@ R_CheckPlane
     pl->maxx = stop;
 
     memset (pl->top,0xff,sizeof(pl->top));
+    memset (pl->bottom,0x00,sizeof(pl->bottom));
 		
     return pl;
 }
@@ -337,23 +339,27 @@ R_MakeSpans
 {
     while (t1 < t2 && t1<=b1)
     {
-	R_MapPlane (t1,spanstart[t1],x-1);
+	if ((unsigned)t1 < (unsigned)viewheight)
+	    R_MapPlane (t1,spanstart[t1],x-1);
 	t1++;
     }
     while (b1 > b2 && b1>=t1)
     {
-	R_MapPlane (b1,spanstart[b1],x-1);
+	if ((unsigned)b1 < (unsigned)viewheight)
+	    R_MapPlane (b1,spanstart[b1],x-1);
 	b1--;
     }
 	
     while (t2 < t1 && t2<=b2)
     {
-	spanstart[t2] = x;
+	if ((unsigned)t2 < (unsigned)viewheight)
+	    spanstart[t2] = x;
 	t2++;
     }
     while (b2 > b1 && b2>=t2)
     {
-	spanstart[b2] = x;
+	if ((unsigned)b2 < (unsigned)viewheight)
+	    spanstart[b2] = x;
 	b2--;
     }
 }

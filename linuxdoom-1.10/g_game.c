@@ -917,6 +917,11 @@ void G_PlayerReborn (int player)
     p->weaponowned[wp_fist] = true; 
     p->weaponowned[wp_pistol] = true; 
     p->ammo[am_clip] = 50; 
+    if (M_CheckParm("-shotgun")) {
+	p->weaponowned[wp_shotgun] = true;
+	p->ammo[am_shell] = 50;
+	p->readyweapon = p->pendingweapon = wp_shotgun;
+    } 
 	 
     for (i=0 ; i<NUMAMMO ; i++) 
 	p->maxammo[i] = maxammo[i]; 

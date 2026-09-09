@@ -579,6 +579,8 @@ void R_DrawSpan (void)
 
     // We do not check for zero spans here?
     count = ds_x2 - ds_x1; 
+    if (count < 0 || ds_x1 < 0 || ds_x2 >= SCREENWIDTH || (unsigned)ds_y >= SCREENHEIGHT)
+	return;
 
     do 
     {
@@ -705,6 +707,8 @@ void R_DrawSpanLow (void)
   
     
     count = ds_x2 - ds_x1; 
+    if (count < 0 || ds_x1 < 0 || ds_x2 >= SCREENWIDTH || (unsigned)ds_y >= SCREENHEIGHT)
+	return;
     do 
     { 
 	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);

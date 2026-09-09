@@ -32,6 +32,8 @@
 
 
 // Visplane related.
+#define MAXOPENINGS	(SCREENWIDTH*256)
+extern short		openings[MAXOPENINGS];
 extern  short*		lastopening;
 
 
