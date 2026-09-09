@@ -677,17 +677,17 @@ void R_DrawPSprite (pspdef_t* psp)
     flip = (boolean)sprframe->flip[0];
     
     // calculate edges of the shape
-    tx = psp->sx-160*FRACUNIT;
+    tx = psp->sx - 160*FRACUNIT;
 	
     tx -= spriteoffset[lump];	
-    x1 = (centerxfrac + FixedMul (tx,pspritescale) ) >>FRACBITS;
+    x1 = (centerxfrac + FixedMul (tx, pspritescale * SCREEN_MUL) ) >>FRACBITS;
 
     // off the right side
     if (x1 > viewwidth)
 	return;		
 
     tx +=  spritewidth[lump];
-    x2 = ((centerxfrac + FixedMul (tx, pspritescale) ) >>FRACBITS) - 1;
+    x2 = ((centerxfrac + FixedMul (tx, pspritescale * SCREEN_MUL) ) >>FRACBITS) - 1;
 
     // off the left side
     if (x2 < 0)
@@ -699,16 +699,16 @@ void R_DrawPSprite (pspdef_t* psp)
     vis->texturemid = (BASEYCENTER<<FRACBITS)+FRACUNIT/2-(psp->sy-spritetopoffset[lump]);
     vis->x1 = x1 < 0 ? 0 : x1;
     vis->x2 = x2 >= viewwidth ? viewwidth-1 : x2;	
-    vis->scale = pspritescale<<detailshift;
+    vis->scale = (pspritescale * SCREEN_MUL)<<detailshift;
     
     if (flip)
     {
-	vis->xiscale = -pspriteiscale;
+	vis->xiscale = -pspriteiscale / SCREEN_MUL;
 	vis->startfrac = spritewidth[lump]-1;
     }
     else
     {
-	vis->xiscale = pspriteiscale;
+	vis->xiscale = pspriteiscale / SCREEN_MUL;
 	vis->startfrac = 0;
     }
     

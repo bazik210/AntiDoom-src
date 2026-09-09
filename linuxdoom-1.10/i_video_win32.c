@@ -93,8 +93,8 @@ static void I_FillMenuMouseCoords(event_t *ev, LPARAM l)
     if (menuactive && menu_mouse) {
         RECT rc; GetClientRect(win, &rc);
         int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
-        ev->data2 = (cw > 0) ? (int)LOWORD(l) * SCREENWIDTH / cw : 0;
-        ev->data3 = (ch > 0) ? (int)HIWORD(l) * SCREENHEIGHT / ch : 0;
+        ev->data2 = (cw > 0) ? (int)LOWORD(l) * BASE_WIDTH / cw : 0;
+        ev->data3 = (ch > 0) ? (int)HIWORD(l) * BASE_HEIGHT / ch : 0;
     } else {
         ev->data2 = 0;
         ev->data3 = 0;

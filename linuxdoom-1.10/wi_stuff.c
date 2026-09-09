@@ -433,13 +433,13 @@ void WI_drawLF(void)
     int y = WI_TITLEY;
 
     // draw <LevelName> 
-    V_DrawPatch((SCREENWIDTH - SHORT(lnames[wbs->last]->width))/2,
+    V_DrawPatch((BASE_WIDTH - SHORT(lnames[wbs->last]->width))/2,
 		y, FB, lnames[wbs->last]);
 
     // draw "Finished!"
     y += (5*SHORT(lnames[wbs->last]->height))/4;
     
-    V_DrawPatch((SCREENWIDTH - SHORT(finished->width))/2,
+    V_DrawPatch((BASE_WIDTH - SHORT(finished->width))/2,
 		y, FB, finished);
 }
 
@@ -451,13 +451,13 @@ void WI_drawEL(void)
     int y = WI_TITLEY;
 
     // draw "Entering"
-    V_DrawPatch((SCREENWIDTH - SHORT(entering->width))/2,
+    V_DrawPatch((BASE_WIDTH - SHORT(entering->width))/2,
 		y, FB, entering);
 
     // draw level
     y += (5*SHORT(lnames[wbs->next]->height))/4;
 
-    V_DrawPatch((SCREENWIDTH - SHORT(lnames[wbs->next]->width))/2,
+    V_DrawPatch((BASE_WIDTH - SHORT(lnames[wbs->next]->width))/2,
 		y, FB, lnames[wbs->next]);
 
 }
@@ -1458,21 +1458,21 @@ void WI_drawStats(void)
     WI_drawLF();
 
     V_DrawPatch(SP_STATSX, SP_STATSY, FB, kills);
-    WI_drawPercent(SCREENWIDTH - SP_STATSX, SP_STATSY, cnt_kills[0]);
+    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY, cnt_kills[0]);
 
     V_DrawPatch(SP_STATSX, SP_STATSY+lh, FB, items);
-    WI_drawPercent(SCREENWIDTH - SP_STATSX, SP_STATSY+lh, cnt_items[0]);
+    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY+lh, cnt_items[0]);
 
     V_DrawPatch(SP_STATSX, SP_STATSY+2*lh, FB, sp_secret);
-    WI_drawPercent(SCREENWIDTH - SP_STATSX, SP_STATSY+2*lh, cnt_secret[0]);
+    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY+2*lh, cnt_secret[0]);
 
     V_DrawPatch(SP_TIMEX, SP_TIMEY, FB, time);
-    WI_drawTime(SCREENWIDTH/2 - SP_TIMEX, SP_TIMEY, cnt_time);
+    WI_drawTime(BASE_WIDTH/2 - SP_TIMEX, SP_TIMEY, cnt_time);
 
     if (wbs->epsd < 3)
     {
-	V_DrawPatch(SCREENWIDTH/2 + SP_TIMEX, SP_TIMEY, FB, par);
-	WI_drawTime(SCREENWIDTH - SP_TIMEX, SP_TIMEY, cnt_par);
+	V_DrawPatch(BASE_WIDTH/2 + SP_TIMEX, SP_TIMEY, FB, par);
+	WI_drawTime(BASE_WIDTH - SP_TIMEX, SP_TIMEY, cnt_par);
     }
 
 }

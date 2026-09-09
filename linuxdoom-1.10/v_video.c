@@ -170,18 +170,22 @@ V_CopyRect
 	 
 #ifdef RANGECHECK 
     if (srcx<0
-	||srcx+width >SCREENWIDTH
+	||srcx+width >BASE_WIDTH
 	|| srcy<0
-	|| srcy+height>SCREENHEIGHT 
-	||destx<0||destx+width >SCREENWIDTH
+	|| srcy+height>BASE_HEIGHT 
+	||destx<0||destx+width >BASE_WIDTH
 	|| desty<0
-	|| desty+height>SCREENHEIGHT 
+	|| desty+height>BASE_HEIGHT 
 	|| (unsigned)srcscrn>4
 	|| (unsigned)destscrn>4)
     {
 	I_Error ("Bad V_CopyRect");
     }
 #endif 
+    srcx *= SCREEN_MUL; srcy *= SCREEN_MUL;
+    destx *= SCREEN_MUL; desty *= SCREEN_MUL;
+    width *= SCREEN_MUL; height *= SCREEN_MUL;
+
     V_MarkRect (destx, desty, width, height); 
 	 
     src = screens[srcscrn]+SCREENWIDTH*srcy+srcx; 
@@ -220,9 +224,9 @@ V_DrawPatch
     x -= SHORT(patch->leftoffset); 
 #ifdef RANGECHECK 
     if (x<0
-	||x+SHORT(patch->width) >SCREENWIDTH
+	||x+SHORT(patch->width) >BASE_WIDTH
 	|| y<0
-	|| y+SHORT(patch->height)>SCREENHEIGHT 
+	|| y+SHORT(patch->height)>BASE_HEIGHT 
 	|| (unsigned)scrn>4)
     {
       fprintf( stderr, "Patch at %d,%d exceeds LFB\n", x,y );
@@ -233,14 +237,14 @@ V_DrawPatch
 #endif 
  
     if (!scrn)
-	V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height)); 
+	V_MarkRect (x * SCREEN_MUL, y * SCREEN_MUL, SHORT(patch->width) * SCREEN_MUL, SHORT(patch->height) * SCREEN_MUL); 
 
     col = 0; 
-    desttop = screens[scrn]+y*SCREENWIDTH+x; 
+    desttop = screens[scrn]+ (y * SCREEN_MUL)*SCREENWIDTH + (x * SCREEN_MUL); 
 	 
     w = SHORT(patch->width); 
 
-    for ( ; col<w ; x++, col++, desttop++)
+    for ( ; col<w ; col++, desttop += SCREEN_MUL)
     { 
 	column = (column_t *)((byte *)patch + LONG(patch->columnofs[col])); 
  
@@ -248,13 +252,17 @@ V_DrawPatch
 	while (column->topdelta != 0xff ) 
 	{ 
 	    source = (byte *)column + 3; 
-	    dest = desttop + column->topdelta*SCREENWIDTH; 
+	    dest = desttop + (column->topdelta * SCREEN_MUL)*SCREENWIDTH; 
 	    count = column->length; 
 			 
 	    while (count--) 
 	    { 
-		*dest = *source++; 
-		dest += SCREENWIDTH; 
+		byte c = *source++; 
+		dest[0] = c;
+		dest[1] = c;
+		dest[SCREENWIDTH] = c;
+		dest[SCREENWIDTH + 1] = c;
+		dest += SCREENWIDTH * 2; 
 	    } 
 	    column = (column_t *)(  (byte *)column + column->length 
 				    + 4 ); 
@@ -287,9 +295,9 @@ V_DrawPatchFlipped
     x -= SHORT(patch->leftoffset); 
 #ifdef RANGECHECK 
     if (x<0
-	||x+SHORT(patch->width) >SCREENWIDTH
+	||x+SHORT(patch->width) >BASE_WIDTH
 	|| y<0
-	|| y+SHORT(patch->height)>SCREENHEIGHT 
+	|| y+SHORT(patch->height)>BASE_HEIGHT 
 	|| (unsigned)scrn>4)
     {
       fprintf( stderr, "Patch origin %d,%d exceeds LFB\n", x,y );
@@ -298,14 +306,14 @@ V_DrawPatchFlipped
 #endif 
  
     if (!scrn)
-	V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height)); 
+	V_MarkRect (x * SCREEN_MUL, y * SCREEN_MUL, SHORT(patch->width) * SCREEN_MUL, SHORT(patch->height) * SCREEN_MUL); 
 
     col = 0; 
-    desttop = screens[scrn]+y*SCREENWIDTH+x; 
+    desttop = screens[scrn]+ (y * SCREEN_MUL)*SCREENWIDTH + (x * SCREEN_MUL); 
 	 
     w = SHORT(patch->width); 
 
-    for ( ; col<w ; x++, col++, desttop++) 
+    for ( ; col<w ; col++, desttop += SCREEN_MUL) 
     { 
 	column = (column_t *)((byte *)patch + LONG(patch->columnofs[w-1-col])); 
  
@@ -313,13 +321,17 @@ V_DrawPatchFlipped
 	while (column->topdelta != 0xff ) 
 	{ 
 	    source = (byte *)column + 3; 
-	    dest = desttop + column->topdelta*SCREENWIDTH; 
+	    dest = desttop + (column->topdelta * SCREEN_MUL)*SCREENWIDTH; 
 	    count = column->length; 
 			 
 	    while (count--) 
 	    { 
-		*dest = *source++; 
-		dest += SCREENWIDTH; 
+		byte c = *source++; 
+		dest[0] = c;
+		dest[1] = c;
+		dest[SCREENWIDTH] = c;
+		dest[SCREENWIDTH + 1] = c;
+		dest += SCREENWIDTH * 2; 
 	    } 
 	    column = (column_t *)(  (byte *)column + column->length 
 				    + 4 ); 

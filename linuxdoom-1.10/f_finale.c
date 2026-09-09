@@ -674,8 +674,8 @@ void F_BunnyScroll (void)
 	return;
     if (finalecount < 1180)
     {
-	V_DrawPatch ((SCREENWIDTH-13*8)/2,
-		     (SCREENHEIGHT-8*8)/2,0, W_CacheLumpName ("END0",PU_CACHE));
+	V_DrawPatch ((BASE_WIDTH-13*8)/2,
+		     (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName ("END0",PU_CACHE));
 	laststage = 0;
 	return;
     }
@@ -690,7 +690,7 @@ void F_BunnyScroll (void)
     }
 	
     sprintf (name,"END%i",stage);
-    V_DrawPatch ((SCREENWIDTH-13*8)/2, (SCREENHEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
+    V_DrawPatch ((BASE_WIDTH-13*8)/2, (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
 }
 
 
