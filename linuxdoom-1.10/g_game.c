@@ -1533,21 +1533,30 @@ G_InitNew
     else
 	respawnmonsters = false;
 		
-    if (fastparm || (skill == sk_nightmare && gameskill != sk_nightmare) )
+    static boolean fast_applied = false;
+    boolean need_fast = (fastparm || skill == sk_nightmare);
+
+    if (need_fast && !fast_applied)
     { 
 	for (i=S_SARG_RUN1 ; i<=S_SARG_PAIN2 ; i++) 
+	{
 	    states[i].tics >>= 1; 
+	    if (states[i].tics < 1)
+		states[i].tics = 1;
+	}
 	mobjinfo[MT_BRUISERSHOT].speed = 20*FRACUNIT; 
 	mobjinfo[MT_HEADSHOT].speed = 20*FRACUNIT; 
 	mobjinfo[MT_TROOPSHOT].speed = 20*FRACUNIT; 
+	fast_applied = true;
     } 
-    else if (skill != sk_nightmare && gameskill == sk_nightmare) 
+    else if (!need_fast && fast_applied) 
     { 
 	for (i=S_SARG_RUN1 ; i<=S_SARG_PAIN2 ; i++) 
 	    states[i].tics <<= 1; 
 	mobjinfo[MT_BRUISERSHOT].speed = 15*FRACUNIT; 
 	mobjinfo[MT_HEADSHOT].speed = 10*FRACUNIT; 
 	mobjinfo[MT_TROOPSHOT].speed = 10*FRACUNIT; 
+	fast_applied = false;
     } 
 	 
 			 

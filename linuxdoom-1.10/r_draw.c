@@ -810,40 +810,40 @@ void R_FillBackScreen (void)
 	
     patch = W_CacheLumpName ("brdr_t",PU_CACHE);
 
-    for (x=0 ; x<scaledviewwidth ; x+=8)
-	V_DrawPatch (viewwindowx+x,viewwindowy-8,1,patch);
+    for (x=0 ; x<scaledviewwidth ; x+=8*SCREEN_MUL)
+	V_DrawPatch ((viewwindowx+x)/SCREEN_MUL,(viewwindowy-8*SCREEN_MUL)/SCREEN_MUL,1,patch);
     patch = W_CacheLumpName ("brdr_b",PU_CACHE);
 
-    for (x=0 ; x<scaledviewwidth ; x+=8)
-	V_DrawPatch (viewwindowx+x,viewwindowy+viewheight,1,patch);
+    for (x=0 ; x<scaledviewwidth ; x+=8*SCREEN_MUL)
+	V_DrawPatch ((viewwindowx+x)/SCREEN_MUL,(viewwindowy+viewheight)/SCREEN_MUL,1,patch);
     patch = W_CacheLumpName ("brdr_l",PU_CACHE);
 
-    for (y=0 ; y<viewheight ; y+=8)
-	V_DrawPatch (viewwindowx-8,viewwindowy+y,1,patch);
+    for (y=0 ; y<viewheight ; y+=8*SCREEN_MUL)
+	V_DrawPatch ((viewwindowx-8*SCREEN_MUL)/SCREEN_MUL,(viewwindowy+y)/SCREEN_MUL,1,patch);
     patch = W_CacheLumpName ("brdr_r",PU_CACHE);
 
-    for (y=0 ; y<viewheight ; y+=8)
-	V_DrawPatch (viewwindowx+scaledviewwidth,viewwindowy+y,1,patch);
+    for (y=0 ; y<viewheight ; y+=8*SCREEN_MUL)
+	V_DrawPatch ((viewwindowx+scaledviewwidth)/SCREEN_MUL,(viewwindowy+y)/SCREEN_MUL,1,patch);
 
 
     // Draw beveled edge. 
-    V_DrawPatch (viewwindowx-8,
-		 viewwindowy-8,
+    V_DrawPatch ((viewwindowx-8*SCREEN_MUL)/SCREEN_MUL,
+		 (viewwindowy-8*SCREEN_MUL)/SCREEN_MUL,
 		 1,
 		 W_CacheLumpName ("brdr_tl",PU_CACHE));
     
-    V_DrawPatch (viewwindowx+scaledviewwidth,
-		 viewwindowy-8,
+    V_DrawPatch ((viewwindowx+scaledviewwidth)/SCREEN_MUL,
+		 (viewwindowy-8*SCREEN_MUL)/SCREEN_MUL,
 		 1,
 		 W_CacheLumpName ("brdr_tr",PU_CACHE));
     
-    V_DrawPatch (viewwindowx-8,
-		 viewwindowy+viewheight,
+    V_DrawPatch ((viewwindowx-8*SCREEN_MUL)/SCREEN_MUL,
+		 (viewwindowy+viewheight)/SCREEN_MUL,
 		 1,
 		 W_CacheLumpName ("brdr_bl",PU_CACHE));
     
-    V_DrawPatch (viewwindowx+scaledviewwidth,
-		 viewwindowy+viewheight,
+    V_DrawPatch ((viewwindowx+scaledviewwidth)/SCREEN_MUL,
+		 (viewwindowy+viewheight)/SCREEN_MUL,
 		 1,
 		 W_CacheLumpName ("brdr_br",PU_CACHE));
 } 

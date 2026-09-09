@@ -56,6 +56,7 @@ P_SetMobjState
   statenum_t	state )
 {
     state_t*	st;
+    int		loop_count = 0;
 
     do
     {
@@ -78,6 +79,12 @@ P_SetMobjState
 	    st->action.acp1(mobj);	
 	
 	state = st->nextstate;
+	if (++loop_count > 100)
+	{
+	    if (mobj->tics <= 0)
+		mobj->tics = 1;
+	    break;
+	}
     } while (!mobj->tics);
 				
     return true;
