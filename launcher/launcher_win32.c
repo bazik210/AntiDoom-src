@@ -38,6 +38,7 @@
 #define IDC_CHK_QUICKSTART  123
 #define IDC_CHK_JUMP        124
 #define IDC_BTN_LANG        125
+#define IDC_CHK_SMOOTH      126
 
 // Static Label IDs for dynamic translation
 #define IDC_LBL_IWAD        201
@@ -49,7 +50,7 @@
 #define IDC_LBL_EXTRA       207
 
 static HWND hIwadPath, hIwadPreset, hPwadPath;
-static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect;
+static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect, hChkSmooth;
 static HWND hChkBot, hChkMlook, hChkMenuMouse, hChkFast, hChkNoMonsters, hChkRespawn, hChkJUMP;
 static HWND hSkillCombo, hWarpEdit, hChkQuickStart, hExtraEdit, hChkCloseStart;
 static HWND hBtnLaunch, hBtnSave, hBtnExit, hIwadBrowse, hPwadBrowse, hBtnLang;
@@ -291,7 +292,8 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hPwadBrowse, L"Обзор...");
 
         SetWindowTextW(hLblRes, L"Разрешение экрана:");
-        SetWindowTextW(hChkKeepAspect, L"Сохранять пропорции 16:10 (-keepaspect)");
+        SetWindowTextW(hChkKeepAspect, L"Сохранять пропорции (-keepaspect)");
+        SetWindowTextW(hChkSmooth, L"Сглаживание (Bilinear) (-smooth)");
         SetWindowTextW(hChkFullscreen, L"Полный экран (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Окно без рамок (-maximized)");
 
@@ -324,7 +326,8 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hPwadBrowse, L"Browse...");
 
         SetWindowTextW(hLblRes, L"Screen Resolution:");
-        SetWindowTextW(hChkKeepAspect, L"Preserve 16:10 Aspect Ratio (-keepaspect)");
+        SetWindowTextW(hChkKeepAspect, L"Preserve Aspect Ratio (-keepaspect)");
+        SetWindowTextW(hChkSmooth, L"Smooth Scaling (Bilinear) (-smooth)");
         SetWindowTextW(hChkFullscreen, L"Fullscreen Mode (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Borderless Window (-maximized)");
 
@@ -404,6 +407,9 @@ static void SaveSettings(void)
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkKeepAspect, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"KeepAspect", buf, INI_FILE);
 
+    swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkSmooth, BM_GETCHECK, 0, 0));
+    WritePrivateProfileStringW(L"Launcher", L"Smooth", buf, INI_FILE);
+
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkBot, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Bot", buf, INI_FILE);
 
@@ -481,6 +487,7 @@ static void LoadSettings(void)
     SendMessageW(hChkFullscreen, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Fullscreen", 0, INI_FILE), 0);
     SendMessageW(hChkMaximized, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Maximized", 0, INI_FILE), 0);
     SendMessageW(hChkKeepAspect, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"KeepAspect", 1, INI_FILE), 0);
+    SendMessageW(hChkSmooth, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Smooth", 0, INI_FILE), 0);
 
     SendMessageW(hChkBot, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Bot", 0, INI_FILE), 0);
     SendMessageW(hChkMlook, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Mlook", 1, INI_FILE), 0);
@@ -626,6 +633,7 @@ static void LaunchGame(HWND hWnd)
     if (SendMessageW(hChkFullscreen, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -fullscreen");
     if (SendMessageW(hChkMaximized, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -maximized");
     if (SendMessageW(hChkKeepAspect, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -keepaspect");
+    if (SendMessageW(hChkSmooth, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -smooth");
 
     if (SendMessageW(hChkBot, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -bot");
     if (!SendMessageW(hChkMlook, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomlook");
@@ -752,7 +760,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         for (int i = 0; i < res_count; i++)
             SendMessageW(hResCombo, CB_ADDSTRING, 0, (LPARAM)res_options[i].label);
 
-        hChkKeepAspect = CreateWindowW(L"BUTTON", L"Сохранять пропорции 16:10 (-keepaspect)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 250, 320, 20, hWnd, (HMENU)IDC_CHK_KEEPASPECT, NULL, NULL);
+        hChkKeepAspect = CreateWindowW(L"BUTTON", L"Сохранять пропорции (-keepaspect)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 250, 240, 20, hWnd, (HMENU)IDC_CHK_KEEPASPECT, NULL, NULL);
+        hChkSmooth = CreateWindowW(L"BUTTON", L"Сглаживание (Bilinear) (-smooth)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 250, 260, 20, hWnd, (HMENU)IDC_CHK_SMOOTH, NULL, NULL);
         hChkFullscreen = CreateWindowW(L"BUTTON", L"Полный экран (-fullscreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 275, 230, 20, hWnd, (HMENU)IDC_CHK_FULLSCREEN, NULL, NULL);
         hChkMaximized = CreateWindowW(L"BUTTON", L"Окно без рамок (-maximized)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 275, 260, 20, hWnd, (HMENU)IDC_CHK_MAXIMIZED, NULL, NULL);
 

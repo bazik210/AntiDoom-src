@@ -283,6 +283,7 @@ typedef enum
 
 extern int allow_jump;
 extern int key_jump;
+extern int smooth_scaling;
 
 
 

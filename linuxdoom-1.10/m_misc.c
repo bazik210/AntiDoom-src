@@ -293,6 +293,7 @@ default_t	defaults[] =
     {"menu_mouse",&menu_mouse, 1},
     {"allow_jump",&allow_jump, 0},
     {"key_jump",&key_jump, ' '},
+    {"smooth_scaling",&smooth_scaling, 0},
 
     {"use_joystick",&usejoystick, 0},
     {"joyb_fire",&joybfire,0},
@@ -439,6 +440,8 @@ void M_LoadDefaults (void)
     if (M_CheckParm("-menumouse")) menu_mouse = 1;
     if (M_CheckParm("-jump")) allow_jump = 1;
     if (M_CheckParm("-nojump")) allow_jump = 0;
+    if (M_CheckParm("-smooth") || M_CheckParm("-linear") || M_CheckParm("-bilinear")) smooth_scaling = 1;
+    if (M_CheckParm("-nosmooth") || M_CheckParm("-nearest")) smooth_scaling = 0;
     i = M_CheckParm("-keyjump");
     if (i && i < myargc - 1)
     {

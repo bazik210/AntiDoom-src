@@ -3,6 +3,7 @@
 #undef boolean
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "doomstat.h"
 #include "i_system.h"
@@ -23,6 +24,12 @@ static boolean closing;
 static boolean fullscreen;
 int mouse_buttons = 0;
 static boolean mouse_captured;
+int smooth_scaling = 0;
+typedef struct { int sx; int x_diff; int x_diff1; } x_lut_t;
+static uint32_t *smooth_buf = NULL;
+static int smooth_buf_w = 0, smooth_buf_h = 0;
+static x_lut_t *x_lut = NULL;
+static int x_lut_w = 0;
 static int mouse_accum_x = 0;
 static int mouse_accum_y = 0;
 
@@ -309,6 +316,8 @@ void I_ShutdownGraphics(void)
     if (dc) ReleaseDC(win, dc); dc = NULL;
     if (win) DestroyWindow(win); win = NULL;
     free(rgb); rgb = NULL; free(screens[0]); screens[0] = NULL;
+    if (smooth_buf) { free(smooth_buf); smooth_buf = NULL; smooth_buf_w = smooth_buf_h = 0; }
+    if (x_lut) { free(x_lut); x_lut = NULL; x_lut_w = 0; }
 }
 
 void I_StartFrame(void) { }
@@ -368,8 +377,63 @@ void I_FinishUpdate(void)
     } else {
         left = 0; top = 0; outw = r.right; outh = r.bottom;
     }
-    StretchDIBits(dc, left, top, outw, outh, 0, 0, SCREENWIDTH, SCREENHEIGHT,
-                  rgb, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    if (smooth_scaling && (outw != SCREENWIDTH || outh != SCREENHEIGHT)) {
+        if (outw > smooth_buf_w || outh > smooth_buf_h) {
+            if (smooth_buf) free(smooth_buf);
+            smooth_buf_w = outw > smooth_buf_w ? outw : smooth_buf_w;
+            smooth_buf_h = outh > smooth_buf_h ? outh : smooth_buf_h;
+            smooth_buf = (uint32_t*)malloc(smooth_buf_w * smooth_buf_h * sizeof(uint32_t));
+        }
+        if (outw != x_lut_w) {
+            if (x_lut) free(x_lut);
+            x_lut = (x_lut_t*)malloc(outw * sizeof(x_lut_t));
+            x_lut_w = outw;
+            int x_ratio = ((SCREENWIDTH - 1) << 16) / (outw > 1 ? (outw - 1) : 1);
+            for (x = 0; x < outw; x++) {
+                int val = x * x_ratio;
+                x_lut[x].sx = val >> 16;
+                x_lut[x].x_diff = (val & 0xffff) >> 8;
+                x_lut[x].x_diff1 = 256 - x_lut[x].x_diff;
+            }
+        }
+        int y_ratio = ((SCREENHEIGHT - 1) << 16) / (outh > 1 ? (outh - 1) : 1);
+        for (y = 0; y < outh; y++) {
+            int y_val = y * y_ratio;
+            int sy = y_val >> 16;
+            int y_diff = (y_val & 0xffff) >> 8;
+            int y_diff1 = 256 - y_diff;
+            const uint32_t *s1 = (const uint32_t*)&rgb[sy * SCREENWIDTH];
+            const uint32_t *s2 = (const uint32_t*)&rgb[(sy < SCREENHEIGHT - 1 ? sy + 1 : sy) * SCREENWIDTH];
+            uint32_t *d_row = &smooth_buf[y * outw];
+            for (x = 0; x < outw; x++) {
+                int sx = x_lut[x].sx, x_diff = x_lut[x].x_diff, x_diff1 = x_lut[x].x_diff1;
+                int sx1 = (sx < SCREENWIDTH - 1) ? sx + 1 : sx;
+                uint32_t p00 = s1[sx], p10 = s1[sx1], p01 = s2[sx], p11 = s2[sx1];
+                int w00 = (x_diff1 * y_diff1) >> 8, w10 = (x_diff * y_diff1) >> 8;
+                int w01 = (x_diff1 * y_diff) >> 8,  w11 = (x_diff * y_diff) >> 8;
+                uint32_t rb00 = p00 & 0x00FF00FF, rb10 = p10 & 0x00FF00FF;
+                uint32_t rb01 = p01 & 0x00FF00FF, rb11 = p11 & 0x00FF00FF;
+                uint32_t rb = ((rb00 * w00 + rb10 * w10 + rb01 * w01 + rb11 * w11) >> 8) & 0x00FF00FF;
+                uint32_t ag00 = (p00 >> 8) & 0x00FF00FF, ag10 = (p10 >> 8) & 0x00FF00FF;
+                uint32_t ag01 = (p01 >> 8) & 0x00FF00FF, ag11 = (p11 >> 8) & 0x00FF00FF;
+                uint32_t ag = (ag00 * w00 + ag10 * w10 + ag01 * w01 + ag11 * w11) & 0xFF00FF00;
+                d_row[x] = ag | rb;
+            }
+        }
+        BITMAPINFO s_bmi;
+        memset(&s_bmi, 0, sizeof(s_bmi));
+        s_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        s_bmi.bmiHeader.biWidth = outw;
+        s_bmi.bmiHeader.biHeight = -outh;
+        s_bmi.bmiHeader.biPlanes = 1;
+        s_bmi.bmiHeader.biBitCount = 32;
+        s_bmi.bmiHeader.biCompression = BI_RGB;
+        StretchDIBits(dc, left, top, outw, outh, 0, 0, outw, outh,
+                      smooth_buf, &s_bmi, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        StretchDIBits(dc, left, top, outw, outh, 0, 0, SCREENWIDTH, SCREENHEIGHT,
+                      rgb, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    }
     if (top > 0) PatBlt(dc, 0, 0, r.right, top, BLACKNESS);
     if (top + outh < r.bottom) PatBlt(dc, 0, top + outh, r.right, r.bottom - top - outh, BLACKNESS);
     if (left > 0) PatBlt(dc, 0, top, left, outh, BLACKNESS);

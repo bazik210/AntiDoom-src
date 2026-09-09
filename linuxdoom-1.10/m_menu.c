@@ -1133,20 +1133,14 @@ void M_ChangeSensitivity(int choice)
 
 void M_ChangeDetail(int choice)
 {
-    choice = 0;
-    detailLevel = 1 - detailLevel;
-
-    // FIXME - does not work. Remove anyway?
-    fprintf( stderr, "M_ChangeDetail: low detail mode n.a.\n");
-
-    return;
-    
-    /*R_SetViewSize (screenblocks, detailLevel);
-
-    if (!detailLevel)
-	players[consoleplayer].message = DETAILHI;
+    (void)choice;
+    smooth_scaling = !smooth_scaling;
+    message_dontfuckwithme = true;
+    if (smooth_scaling)
+        players[consoleplayer].message = "Bilinear Smoothing: ON";
     else
-	players[consoleplayer].message = DETAILLO;*/
+        players[consoleplayer].message = "Bilinear Smoothing: OFF";
+    I_Log("Bilinear smoothing: %s\n", smooth_scaling ? "ON" : "OFF");
 }
 
 
