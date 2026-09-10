@@ -662,16 +662,12 @@ boolean G_Responder (event_t* ev)
 	mousebuttons[0] = ev->data1 & 1; 
 	mousebuttons[1] = ev->data1 & 2; 
 	mousebuttons[2] = ev->data1 & 4; 
-	if (gamestate == GS_LEVEL && (!level_weapon_ready || !prev_weapon_ready))
+	if (gamestate == GS_LEVEL && !level_weapon_ready)
 	{
-	    if (level_weapon_ready)
-	        prev_weapon_ready = true;
 	    mousebuttons[0] = 0;
 	    mousex = mousey = 0;
 	    return true;
 	}
-	if (!level_weapon_ready)
-	    prev_weapon_ready = false;
 	if (gamestate == GS_LEVEL && players[consoleplayer].playerstate == PST_DEAD)
 	    return true;
 	mousex += ev->data2*(mouseSensitivity+5)/10; 

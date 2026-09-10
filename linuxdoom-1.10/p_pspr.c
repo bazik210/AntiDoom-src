@@ -439,7 +439,9 @@ A_Raise
 
     P_SetPsprite (player, ps_weapon, newstate);
     extern boolean level_weapon_ready;
+    extern boolean prev_weapon_ready;
     level_weapon_ready = true;
+    prev_weapon_ready = true;
 }
 
 
