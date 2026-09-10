@@ -33,6 +33,7 @@ static uint32_t *smooth_buf = NULL;
 static int smooth_buf_w = 0, smooth_buf_h = 0;
 static x_lut_t *x_lut = NULL;
 static int x_lut_w = 0;
+static int x_lut_source_w = 0;
 static int mouse_accum_x = 0;
 static int mouse_accum_y = 0;
 
@@ -76,16 +77,7 @@ static void I_UpdateMouseCapture(void)
     HWND active = GetActiveWindow();
     extern int menu_mouse;
     boolean is_fg = (fg == win || active == win);
-    if (!is_fg && fg) {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(fg, &pid);
-        if (pid == GetCurrentProcessId()) is_fg = true;
-    }
-    if (fullscreen && !is_fg) {
-        SetForegroundWindow(win);
-        SetFocus(win);
-        is_fg = true;
-    }
+    if (IsIconic(win)) is_fg = false;
     boolean want_capture = (is_fg && (fullscreen || !menuactive || !menu_mouse));
     I_CaptureMouse(want_capture);
 }
@@ -153,10 +145,24 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     case WM_ACTIVATE:
         if (LOWORD(w) != WA_INACTIVE) {
             I_UpdateMouseCapture();
-        } else if (!fullscreen) {
+        } else {
             I_CaptureMouse(false);
         }
         return 0;
+    case WM_ACTIVATEAPP:
+        if (!w) {
+            I_CaptureMouse(false);
+            mouse_buttons = 0;
+        } else {
+            I_UpdateMouseCapture();
+        }
+        return 0;
+    case WM_SIZE:
+        if (w == SIZE_MINIMIZED) I_CaptureMouse(false);
+        return DefWindowProc(h, msg, w, l);
+    case WM_SYSCOMMAND:
+        if ((w & 0xfff0) == SC_MINIMIZE) I_CaptureMouse(false);
+        return DefWindowProc(h, msg, w, l);
     case WM_LBUTTONDOWN: {
         mouse_buttons |= 1;
         extern int menu_mouse;
@@ -323,7 +329,7 @@ void I_ShutdownGraphics(void)
     if (win) DestroyWindow(win); win = NULL;
     free(rgb); rgb = NULL; free(screens[0]); screens[0] = NULL;
     if (smooth_buf) { free(smooth_buf); smooth_buf = NULL; smooth_buf_w = smooth_buf_h = 0; }
-    if (x_lut) { free(x_lut); x_lut = NULL; x_lut_w = 0; }
+    if (x_lut) { free(x_lut); x_lut = NULL; x_lut_w = 0; x_lut_source_w = 0; }
 }
 
 void I_StartFrame(void) { }
@@ -366,10 +372,15 @@ void I_StartTic(void)
 void I_FinishUpdate(void)
 {
     int x, y, left, top, outw, outh;
+    extern int detailLevel;
     RECT r;
     for (y = 0; y < SCREENHEIGHT; ++y)
         for (x = 0; x < SCREENWIDTH; ++x) {
-            int i = screens[0][y * SCREENWIDTH + x] * 3;
+            int source_x = x;
+            if (detailLevel && x >= viewwindowx && x < viewwindowx + scaledviewwidth &&
+                y >= viewwindowy && y < viewwindowy + viewheight)
+                source_x = viewwindowx + ((x - viewwindowx) & ~1);
+            int i = screens[0][y * SCREENWIDTH + source_x] * 3;
             rgb[y * SCREENWIDTH + x] = 0xff000000u | ((unsigned)palette[i] << 16) |
                                         ((unsigned)palette[i+1] << 8) | palette[i+2];
         }
@@ -393,10 +404,11 @@ void I_FinishUpdate(void)
             smooth_buf_h = outh > smooth_buf_h ? outh : smooth_buf_h;
             smooth_buf = (uint32_t*)malloc(smooth_buf_w * smooth_buf_h * sizeof(uint32_t));
         }
-        if (outw != x_lut_w) {
+        if (outw != x_lut_w || SCREENWIDTH != x_lut_source_w) {
             if (x_lut) free(x_lut);
             x_lut = (x_lut_t*)malloc(outw * sizeof(x_lut_t));
             x_lut_w = outw;
+            x_lut_source_w = SCREENWIDTH;
             int x_ratio = ((SCREENWIDTH - 1) << 16) / (outw > 1 ? (outw - 1) : 1);
             for (x = 0; x < outw; x++) {
                 int val = x * x_ratio;
@@ -411,8 +423,8 @@ void I_FinishUpdate(void)
             int sy = y_val >> 16;
             int y_diff = (y_val & 0xffff) >> 8;
             int y_diff1 = 256 - y_diff;
-            const uint32_t *s1 = (const uint32_t*)&rgb[sy * SCREENWIDTH];
-            const uint32_t *s2 = (const uint32_t*)&rgb[(sy < SCREENHEIGHT - 1 ? sy + 1 : sy) * SCREENWIDTH];
+            const uint32_t *s1 = &rgb[sy * SCREENWIDTH];
+            const uint32_t *s2 = &rgb[(sy < SCREENHEIGHT - 1 ? sy + 1 : sy) * SCREENWIDTH];
             uint32_t *d_row = &smooth_buf[y * outw];
             for (x = 0; x < outw; x++) {
                 int sx = x_lut[x].sx, x_diff = x_lut[x].x_diff, x_diff1 = x_lut[x].x_diff1;

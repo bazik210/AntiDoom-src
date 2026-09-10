@@ -65,6 +65,9 @@ fixed_t			centerxfrac;
 fixed_t			centeryfrac;
 fixed_t			projection;
 
+// Horizon used by the current yslope table, including view-size rebuilds.
+static int              yslope_centery = -1;
+
 // just for profiling purposes
 int			framecount;	
 
@@ -693,8 +696,11 @@ void R_ExecuteSetViewSize (void)
 	viewheight = (setblocks * ((BASE_HEIGHT - 32) * SCREEN_MUL) / 10) & ~(4 * SCREEN_MUL - 1);
     }
     
-    detailshift = setdetail;
-    viewwidth = scaledviewwidth>>detailshift;
+    /* Keep the scene renderer at full internal resolution. The classic
+       low-detail appearance is applied to the final 3D viewport in the
+       Win32 presentation path, so vis/clipping remain consistent. */
+    detailshift = 0;
+    viewwidth = scaledviewwidth;
 	
     centery = viewheight/2;
     centerx = viewwidth/2;
@@ -705,15 +711,15 @@ void R_ExecuteSetViewSize (void)
     if (!detailshift)
     {
 	colfunc = basecolfunc = R_DrawColumn;
-	fuzzcolfunc = R_DrawFuzzColumn;
-	transcolfunc = R_DrawTranslatedColumn;
+        fuzzcolfunc = R_DrawFuzzColumn;
+        transcolfunc = R_DrawTranslatedColumn;
 	spanfunc = R_DrawSpan;
     }
     else
     {
 	colfunc = basecolfunc = R_DrawColumnLow;
-	fuzzcolfunc = R_DrawFuzzColumn;
-	transcolfunc = R_DrawTranslatedColumn;
+	fuzzcolfunc = R_DrawFuzzColumnLow;
+	transcolfunc = R_DrawTranslatedColumnLow;
 	spanfunc = R_DrawSpanLow;
     }
 
@@ -736,6 +742,7 @@ void R_ExecuteSetViewSize (void)
 	dy = abs(dy);
 	yslope[i] = FixedDiv (projection, dy);
     }
+    yslope_centery = centery;
 	
     for (i=0 ; i<viewwidth ; i++)
     {
@@ -837,7 +844,6 @@ void R_SetupFrame (player_t* player)
     extern int lookdir;
     extern int uncapped_fps;
     extern fixed_t interp_frac;
-    static int last_centery = -1;
 
     // Interpolate lookdir for smooth mouselook
     int render_lookdir = lookdir;
@@ -850,9 +856,9 @@ void R_SetupFrame (player_t* player)
     }
     centery = viewheight/2 + (mlook ? render_lookdir : 0);
     centeryfrac = centery<<FRACBITS;
-    if (centery != last_centery)
+    if (centery != yslope_centery)
     {
-	last_centery = centery;
+	yslope_centery = centery;
 	for (i=0 ; i<viewheight ; i++)
 	{
 	    int dy = ((i-centery)<<FRACBITS)+FRACUNIT/2;

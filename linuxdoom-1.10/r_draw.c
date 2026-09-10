@@ -228,6 +228,7 @@ void R_DrawColumn (void)
 void R_DrawColumnLow (void) 
 { 
     int			count; 
+    int			x;
     byte*		dest; 
     byte*		dest2;
     fixed_t		frac;
@@ -238,6 +239,9 @@ void R_DrawColumnLow (void)
     // Zero length.
     if (count < 0) 
 	return; 
+
+    if (!dc_source || !dc_colormap)
+	return;
 				 
 #ifdef RANGECHECK 
     if ((unsigned)dc_x >= SCREENWIDTH
@@ -249,11 +253,12 @@ void R_DrawColumnLow (void)
     }
     //	dccount++; 
 #endif 
-    // Blocky mode, need to multiply by 2.
-    dc_x <<= 1;
+    // Blocky mode, need to multiply by 2. Keep dc_x unchanged because
+    // masked sprite drawing uses it as the controlling loop variable.
+    x = dc_x << 1;
     
-    dest = ylookup[dc_yl] + columnofs[dc_x];
-    dest2 = ylookup[dc_yl] + columnofs[dc_x+1];
+    dest = ylookup[dc_yl] + columnofs[x];
+    dest2 = ylookup[dc_yl] + columnofs[x+1];
     
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep;
@@ -482,6 +487,62 @@ void R_DrawTranslatedColumn (void)
     } while (count--); 
 } 
 
+void R_DrawFuzzColumnLow (void)
+{
+    int x = dc_x << 1;
+    int yl = dc_yl;
+    int yh = dc_yh;
+    int count;
+    byte *dest, *dest2;
+
+    if (!yl) yl = 1;
+    if (yh == viewheight - 1) yh = viewheight - 2;
+    count = yh - yl;
+    if (count < 0) return;
+
+    dest = ylookup[yl] + columnofs[x];
+    dest2 = ylookup[yl] + columnofs[x + 1];
+    do {
+        *dest = colormaps[6 * 256 + dest[fuzzoffset[fuzzpos]]];
+        if (++fuzzpos == FUZZTABLE) fuzzpos = 0;
+        *dest2 = colormaps[6 * 256 + dest2[fuzzoffset[fuzzpos]]];
+        if (++fuzzpos == FUZZTABLE) fuzzpos = 0;
+        dest += SCREENWIDTH;
+        dest2 += SCREENWIDTH;
+    } while (count--);
+}
+
+void R_DrawTranslatedColumnLow (void)
+{
+    int x = dc_x << 1;
+    int count = dc_yh - dc_yl;
+    byte *dest, *dest2;
+    fixed_t frac, fracstep;
+
+    if (count < 0 || !dc_source || !dc_colormap) return;
+    dest = ylookup[dc_yl] + columnofs[x];
+    dest2 = ylookup[dc_yl] + columnofs[x + 1];
+    fracstep = dc_iscale;
+    frac = dc_texturemid + (dc_yl - centery) * fracstep;
+    do {
+        int index = frac >> FRACBITS;
+        if (dc_source_len > 0) {
+            if (index < 0) index = 0;
+            else if (index >= dc_source_len) index = dc_source_len - 1;
+        } else if (index < 0) {
+            index = 0;
+        }
+        {
+            byte pixel = dc_colormap[dc_translation[dc_source[index]]];
+            *dest = pixel;
+            *dest2 = pixel;
+        }
+        dest += SCREENWIDTH;
+        dest2 += SCREENWIDTH;
+        frac += fracstep;
+    } while (count--);
+}
+
 
 
 
@@ -685,6 +746,10 @@ void R_DrawSpanLow (void)
     byte*		dest; 
     int			count;
     int			spot; 
+    int			x1, x2;
+
+    if (!ds_source || !ds_colormap)
+	return;
 	 
 #ifdef RANGECHECK 
     if (ds_x2 < ds_x1
@@ -701,15 +766,15 @@ void R_DrawSpanLow (void)
     xfrac = ds_xfrac; 
     yfrac = ds_yfrac; 
 
-    // Blocky mode, need to multiply by 2.
-    ds_x1 <<= 1;
-    ds_x2 <<= 1;
+    // Blocky mode, need to multiply by 2 without changing the globals.
+    x1 = ds_x1 << 1;
+    x2 = ds_x2 << 1;
     
-    dest = ylookup[ds_y] + columnofs[ds_x1];
+    dest = ylookup[ds_y] + columnofs[x1];
   
     
-    count = ds_x2 - ds_x1; 
-    if (count < 0 || ds_x1 < 0 || ds_x2 >= SCREENWIDTH || (unsigned)ds_y >= SCREENHEIGHT)
+    count = x2 - x1;
+    if (count < 0 || x1 < 0 || x2 >= SCREENWIDTH || (unsigned)ds_y >= SCREENHEIGHT)
 	return;
     do 
     { 

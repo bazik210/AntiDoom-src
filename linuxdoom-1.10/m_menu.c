@@ -963,6 +963,8 @@ void M_DrawOptions(void)
 	
     V_DrawPatchDirect (OptionsDef.x + M_X + 175,OptionsDef.y+LINEHEIGHT*detail,0,
 		       W_CacheLumpName(detailNames[detailLevel],PU_CACHE));
+    if (!detailLevel && smooth_scaling)
+        M_WriteText(OptionsDef.x + M_X + 226, OptionsDef.y+LINEHEIGHT*detail, "+");
 
     V_DrawPatchDirect (OptionsDef.x + M_X + 120,OptionsDef.y+LINEHEIGHT*messages,0,
 		       W_CacheLumpName(msgNames[showMessages],PU_CACHE));
@@ -1140,13 +1142,24 @@ void M_ChangeSensitivity(int choice)
 void M_ChangeDetail(int choice)
 {
     (void)choice;
-    smooth_scaling = !smooth_scaling;
+    if (!detailLevel && !smooth_scaling) {
+        smooth_scaling = 1;
+    } else if (!detailLevel) {
+        detailLevel = 1;
+        smooth_scaling = 0;
+    } else {
+        detailLevel = 0;
+        smooth_scaling = 0;
+    }
+    R_SetViewSize(screenblocks, detailLevel);
     message_dontfuckwithme = true;
-    if (smooth_scaling)
-        players[consoleplayer].message = "Bilinear Smoothing: ON";
+    if (detailLevel)
+        players[consoleplayer].message = "Graphic Detail: LOW";
+    else if (smooth_scaling)
+        players[consoleplayer].message = "Graphic Detail: HIGH+";
     else
-        players[consoleplayer].message = "Bilinear Smoothing: OFF";
-    I_Log("Bilinear smoothing: %s\n", smooth_scaling ? "ON" : "OFF");
+        players[consoleplayer].message = "Graphic Detail: HIGH";
+    I_Log("Graphic detail: %s\n", detailLevel ? "LOW" : (smooth_scaling ? "HIGH+" : "HIGH"));
 }
 
 
@@ -1982,4 +1995,3 @@ void M_Init (void)
     if (W_CheckNumForName("M_EPI4") < 0 && EpiDef.numitems > 3)
 	EpiDef.numitems = 3;
 }
-
