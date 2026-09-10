@@ -858,7 +858,7 @@ void R_SetupFrame (player_t* player)
 	    int dy = ((i-centery)<<FRACBITS)+FRACUNIT/2;
 	    dy = abs(dy);
 	    if (dy == 0) dy = 1;
-	    yslope[i] = FixedDiv ( (viewwidth<<detailshift)/2*FRACUNIT, dy);
+	    yslope[i] = FixedDiv ( projection, dy);
 	}
     }
     

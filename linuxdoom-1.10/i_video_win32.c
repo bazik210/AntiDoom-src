@@ -90,14 +90,16 @@ static void I_UpdateMouseCapture(void)
     I_CaptureMouse(want_capture);
 }
 
+static int vp_left = 0, vp_top = 0, vp_outw = 0, vp_outh = 0;
+
 static void I_FillMenuMouseCoords(event_t *ev, LPARAM l)
 {
     extern int menu_mouse;
     if (menuactive && menu_mouse) {
-        RECT rc; GetClientRect(win, &rc);
-        int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
-        ev->data2 = (cw > 0) ? (int)LOWORD(l) * BASE_WIDTH / cw : 0;
-        ev->data3 = (ch > 0) ? (int)HIWORD(l) * BASE_HEIGHT / ch : 0;
+        int mx = (int)(short)LOWORD(l) - vp_left;
+        int my = (int)(short)HIWORD(l) - vp_top;
+        ev->data2 = (vp_outw > 0) ? mx * (SCREENWIDTH / SCREEN_MUL) / vp_outw : 0;
+        ev->data3 = (vp_outh > 0) ? my * BASE_HEIGHT / vp_outh : 0;
     } else {
         ev->data2 = 0;
         ev->data3 = 0;
@@ -383,6 +385,7 @@ void I_FinishUpdate(void)
     } else {
         left = 0; top = 0; outw = r.right; outh = r.bottom;
     }
+    vp_left = left; vp_top = top; vp_outw = outw; vp_outh = outh;
     if (smooth_scaling && (outw != SCREENWIDTH || outh != SCREENHEIGHT)) {
         if (outw > smooth_buf_w || outh > smooth_buf_h) {
             if (smooth_buf) free(smooth_buf);

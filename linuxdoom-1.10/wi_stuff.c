@@ -50,6 +50,8 @@ rcsid[] = "$Id: wi_stuff.c,v 1.7 1997/02/03 22:45:13 b1 Exp $";
 
 #include "wi_stuff.h"
 
+#define WI_X (widescreen ? (SCREENWIDTH / SCREEN_MUL - 320) / 2 : 0)
+
 //
 // Data needed to add patches to full screen intermission pics.
 // Patches are statistics messages, and animations.
@@ -85,7 +87,7 @@ rcsid[] = "$Id: wi_stuff.c,v 1.7 1997/02/03 22:45:13 b1 Exp $";
 #define SP_STATSY		50
 
 #define SP_TIMEX		16
-#define SP_TIMEY		(SCREENHEIGHT-32)
+#define SP_TIMEY		(BASE_HEIGHT-32)
 
 
 // NET GAME STUFF
@@ -433,13 +435,13 @@ void WI_drawLF(void)
     int y = WI_TITLEY;
 
     // draw <LevelName> 
-    V_DrawPatch((BASE_WIDTH - SHORT(lnames[wbs->last]->width))/2,
+    V_DrawPatch(WI_X + (BASE_WIDTH - SHORT(lnames[wbs->last]->width))/2,
 		y, FB, lnames[wbs->last]);
 
     // draw "Finished!"
     y += (5*SHORT(lnames[wbs->last]->height))/4;
     
-    V_DrawPatch((BASE_WIDTH - SHORT(finished->width))/2,
+    V_DrawPatch(WI_X + (BASE_WIDTH - SHORT(finished->width))/2,
 		y, FB, finished);
 }
 
@@ -451,13 +453,13 @@ void WI_drawEL(void)
     int y = WI_TITLEY;
 
     // draw "Entering"
-    V_DrawPatch((BASE_WIDTH - SHORT(entering->width))/2,
+    V_DrawPatch(WI_X + (BASE_WIDTH - SHORT(entering->width))/2,
 		y, FB, entering);
 
     // draw level
     y += (5*SHORT(lnames[wbs->next]->height))/4;
 
-    V_DrawPatch((BASE_WIDTH - SHORT(lnames[wbs->next]->width))/2,
+    V_DrawPatch(WI_X + (BASE_WIDTH - SHORT(lnames[wbs->next]->width))/2,
 		y, FB, lnames[wbs->next]);
 
 }
@@ -498,7 +500,7 @@ WI_drawOnLnode
 
     if (fits && i<2)
     {
-	V_DrawPatch(lnodes[wbs->epsd][n].x, lnodes[wbs->epsd][n].y,
+	V_DrawPatch(WI_X + lnodes[wbs->epsd][n].x, lnodes[wbs->epsd][n].y,
 		    FB, c[i]);
     }
     else
@@ -606,7 +608,7 @@ void WI_drawAnimatedBack(void)
 	a = &anims[wbs->epsd][i];
 
 	if (a->ctr >= 0)
-	    V_DrawPatch(a->loc.x, a->loc.y, FB, a->p[a->ctr]);
+	    V_DrawPatch(WI_X + a->loc.x, a->loc.y, FB, a->p[a->ctr]);
     }
 
 }
@@ -1008,16 +1010,16 @@ void WI_drawDeathmatchStats(void)
     WI_drawLF();
 
     // draw stat titles (top line)
-    V_DrawPatch(DM_TOTALSX-SHORT(total->width)/2,
+    V_DrawPatch(WI_X + DM_TOTALSX-SHORT(total->width)/2,
 		DM_MATRIXY-WI_SPACINGY+10,
 		FB,
 		total);
     
-    V_DrawPatch(DM_KILLERSX, DM_KILLERSY, FB, killers);
-    V_DrawPatch(DM_VICTIMSX, DM_VICTIMSY, FB, victims);
+    V_DrawPatch(WI_X + DM_KILLERSX, DM_KILLERSY, FB, killers);
+    V_DrawPatch(WI_X + DM_VICTIMSX, DM_VICTIMSY, FB, victims);
 
     // draw P?
-    x = DM_MATRIXX + DM_SPACINGX;
+    x = WI_X + DM_MATRIXX + DM_SPACINGX;
     y = DM_MATRIXY;
 
     for (i=0 ; i<MAXPLAYERS ; i++)
@@ -1029,7 +1031,7 @@ void WI_drawDeathmatchStats(void)
 			FB,
 			p[i]);
 	    
-	    V_DrawPatch(DM_MATRIXX-SHORT(p[i]->width)/2,
+	    V_DrawPatch(WI_X + DM_MATRIXX-SHORT(p[i]->width)/2,
 			y,
 			FB,
 			p[i]);
@@ -1041,7 +1043,7 @@ void WI_drawDeathmatchStats(void)
 			    FB,
 			    bstar);
 
-		V_DrawPatch(DM_MATRIXX-SHORT(p[i]->width)/2,
+		V_DrawPatch(WI_X + DM_MATRIXX-SHORT(p[i]->width)/2,
 			    y,
 			    FB,
 			    star);
@@ -1064,7 +1066,7 @@ void WI_drawDeathmatchStats(void)
 
     for (i=0 ; i<MAXPLAYERS ; i++)
     {
-	x = DM_MATRIXX + DM_SPACINGX;
+	x = WI_X + DM_MATRIXX + DM_SPACINGX;
 
 	if (playeringame[i])
 	{
@@ -1075,7 +1077,7 @@ void WI_drawDeathmatchStats(void)
 
 		x += DM_SPACINGX;
 	    }
-	    WI_drawNum(DM_TOTALSX+w, y, dm_totals[i], 2);
+	    WI_drawNum(WI_X + DM_TOTALSX+w, y, dm_totals[i], 2);
 	}
 	y += WI_SPACINGY;
     }
@@ -1283,17 +1285,17 @@ void WI_drawNetgameStats(void)
     WI_drawLF();
 
     // draw stat titles (top line)
-    V_DrawPatch(NG_STATSX+NG_SPACINGX-SHORT(kills->width),
+    V_DrawPatch(WI_X + NG_STATSX+NG_SPACINGX-SHORT(kills->width),
 		NG_STATSY, FB, kills);
 
-    V_DrawPatch(NG_STATSX+2*NG_SPACINGX-SHORT(items->width),
+    V_DrawPatch(WI_X + NG_STATSX+2*NG_SPACINGX-SHORT(items->width),
 		NG_STATSY, FB, items);
 
-    V_DrawPatch(NG_STATSX+3*NG_SPACINGX-SHORT(secret->width),
+    V_DrawPatch(WI_X + NG_STATSX+3*NG_SPACINGX-SHORT(secret->width),
 		NG_STATSY, FB, secret);
     
     if (dofrags)
-	V_DrawPatch(NG_STATSX+4*NG_SPACINGX-SHORT(frags->width),
+	V_DrawPatch(WI_X + NG_STATSX+4*NG_SPACINGX-SHORT(frags->width),
 		    NG_STATSY, FB, frags);
 
     // draw stats
@@ -1304,7 +1306,7 @@ void WI_drawNetgameStats(void)
 	if (!playeringame[i])
 	    continue;
 
-	x = NG_STATSX;
+	x = WI_X + NG_STATSX;
 	V_DrawPatch(x-SHORT(p[i]->width), y, FB, p[i]);
 
 	if (i == me)
@@ -1457,22 +1459,22 @@ void WI_drawStats(void)
     
     WI_drawLF();
 
-    V_DrawPatch(SP_STATSX, SP_STATSY, FB, kills);
-    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY, cnt_kills[0]);
+    V_DrawPatch(WI_X + SP_STATSX, SP_STATSY, FB, kills);
+    WI_drawPercent(WI_X + BASE_WIDTH - SP_STATSX, SP_STATSY, cnt_kills[0]);
 
-    V_DrawPatch(SP_STATSX, SP_STATSY+lh, FB, items);
-    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY+lh, cnt_items[0]);
+    V_DrawPatch(WI_X + SP_STATSX, SP_STATSY+lh, FB, items);
+    WI_drawPercent(WI_X + BASE_WIDTH - SP_STATSX, SP_STATSY+lh, cnt_items[0]);
 
-    V_DrawPatch(SP_STATSX, SP_STATSY+2*lh, FB, sp_secret);
-    WI_drawPercent(BASE_WIDTH - SP_STATSX, SP_STATSY+2*lh, cnt_secret[0]);
+    V_DrawPatch(WI_X + SP_STATSX, SP_STATSY+2*lh, FB, sp_secret);
+    WI_drawPercent(WI_X + BASE_WIDTH - SP_STATSX, SP_STATSY+2*lh, cnt_secret[0]);
 
-    V_DrawPatch(SP_TIMEX, SP_TIMEY, FB, time);
-    WI_drawTime(BASE_WIDTH/2 - SP_TIMEX, SP_TIMEY, cnt_time);
+    V_DrawPatch(WI_X + SP_TIMEX, SP_TIMEY, FB, time);
+    WI_drawTime(WI_X + BASE_WIDTH/2 - SP_TIMEX, SP_TIMEY, cnt_time);
 
     if (wbs->epsd < 3)
     {
-	V_DrawPatch(BASE_WIDTH/2 + SP_TIMEX, SP_TIMEY, FB, par);
-	WI_drawTime(BASE_WIDTH - SP_TIMEX, SP_TIMEY, cnt_par);
+	V_DrawPatch(WI_X + BASE_WIDTH/2 + SP_TIMEX, SP_TIMEY, FB, par);
+	WI_drawTime(WI_X + BASE_WIDTH - SP_TIMEX, SP_TIMEY, cnt_par);
     }
 
 }
@@ -1565,7 +1567,9 @@ void WI_loadData(void)
 
     // background
     bg = W_CacheLumpName(name, PU_CACHE);    
-    V_DrawPatch(0, 0, 1, bg);
+    if (widescreen)
+	memset(screens[1], 0, SCREENWIDTH * SCREENHEIGHT);
+    V_DrawPatch(WI_X, 0, 1, bg);
 
 
     // UNUSED unsigned char *pic = screens[1];

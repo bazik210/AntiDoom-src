@@ -42,6 +42,8 @@ rcsid[] = "$Id: f_finale.c,v 1.5 1997/02/03 21:26:34 b1 Exp $";
 #include "doomstat.h"
 #include "r_state.h"
 
+#define F_X (widescreen ? (SCREENWIDTH / SCREEN_MUL - 320) / 2 : 0)
+
 // ?
 //#include "doomstat.h"
 //#include "r_local.h"
@@ -291,7 +293,7 @@ void F_TextWrite (void)
     V_MarkRect (0, 0, SCREENWIDTH, SCREENHEIGHT);
     
     // draw some of the text onto the screen
-    cx = 10;
+    cx = 10 + F_X;
     cy = 10;
     ch = finaletext;
 	
@@ -305,7 +307,7 @@ void F_TextWrite (void)
 	    break;
 	if (c == '\n')
 	{
-	    cx = 10;
+	    cx = 10 + F_X;
 	    cy += 11;
 	    continue;
 	}
@@ -549,7 +551,7 @@ void F_CastPrint (char* text)
     }
     
     // draw it
-    cx = 160-width/2;
+    cx = (SCREENWIDTH / SCREEN_MUL / 2) - width/2;
     ch = text;
     while (ch)
     {
@@ -584,8 +586,10 @@ void F_CastDrawer (void)
     boolean		flip;
     patch_t*		patch;
     
+    if (widescreen)
+	memset(screens[0], 0, SCREENWIDTH * SCREENHEIGHT);
     // erase the entire screen to a background
-    V_DrawPatch (0,0,0, W_CacheLumpName ("BOSSBACK", PU_CACHE));
+    V_DrawPatch (F_X,0,0, W_CacheLumpName ("BOSSBACK", PU_CACHE));
 
     F_CastPrint (castorder[castnum].name);
     
@@ -597,9 +601,9 @@ void F_CastDrawer (void)
 			
     patch = W_CacheLumpNum (lump+firstspritelump, PU_CACHE);
     if (flip)
-	V_DrawPatchFlipped (160,170,0,patch);
+	V_DrawPatchFlipped (160 + F_X,170,0,patch);
     else
-	V_DrawPatch (160,170,0,patch);
+	V_DrawPatch (160 + F_X,170,0,patch);
 }
 
 
@@ -674,7 +678,7 @@ void F_BunnyScroll (void)
 	return;
     if (finalecount < 1180)
     {
-	V_DrawPatch ((BASE_WIDTH-13*8)/2,
+	V_DrawPatch (F_X + (BASE_WIDTH-13*8)/2,
 		     (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName ("END0",PU_CACHE));
 	laststage = 0;
 	return;
@@ -690,7 +694,7 @@ void F_BunnyScroll (void)
     }
 	
     sprintf (name,"END%i",stage);
-    V_DrawPatch ((BASE_WIDTH-13*8)/2, (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
+    V_DrawPatch (F_X + (BASE_WIDTH-13*8)/2, (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
 }
 
 
@@ -709,25 +713,27 @@ void F_Drawer (void)
 	F_TextWrite ();
     else
     {
+	if (widescreen)
+	    memset(screens[0], 0, SCREENWIDTH * SCREENHEIGHT);
 	switch (gameepisode)
 	{
 	  case 1:
 	    if ( gamemode == retail || W_CheckNumForName("HELP2") < 0 )
-	      V_DrawPatch (0,0,0,
+	      V_DrawPatch (F_X,0,0,
 			 W_CacheLumpName("CREDIT",PU_CACHE));
 	    else
-	      V_DrawPatch (0,0,0,
+	      V_DrawPatch (F_X,0,0,
 			 W_CacheLumpName("HELP2",PU_CACHE));
 	    break;
 	  case 2:
-	    V_DrawPatch(0,0,0,
+	    V_DrawPatch(F_X,0,0,
 			W_CacheLumpName("VICTORY2",PU_CACHE));
 	    break;
 	  case 3:
 	    F_BunnyScroll ();
 	    break;
 	  case 4:
-	    V_DrawPatch (0,0,0,
+	    V_DrawPatch (F_X,0,0,
 			 W_CacheLumpName("ENDPIC",PU_CACHE));
 	    break;
 	}

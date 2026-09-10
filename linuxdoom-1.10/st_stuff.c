@@ -40,6 +40,7 @@ rcsid[] = "$Id: st_stuff.c,v 1.6 1997/02/03 22:45:13 b1 Exp $";
 #include "g_game.h"
 
 #include "st_stuff.h"
+#include "st_wings.h"
 #include "st_lib.h"
 #include "r_local.h"
 
@@ -515,10 +516,20 @@ void ST_refreshBackground(void)
 	    for (y = 0; y < ST_HEIGHT * SCREEN_MUL; y++)
 	    {
 		byte *row = screens[4] + y * SCREENWIDTH;
+		int wy = y / SCREEN_MUL;
 		for (x = 0; x < left_w; x++)
-		    row[x] = row[left_w + (x % (32 * SCREEN_MUL))];
+		{
+		    int wx = 128 - ST_X + (x / SCREEN_MUL);
+		    if (wx < 0) wx = 0;
+		    if (wx > 127) wx = 127;
+		    row[x] = st_wing_left[wy][wx];
+		}
 		for (x = 0; x < right_w; x++)
-		    row[right_start + x] = row[left_w + (x % (32 * SCREEN_MUL))];
+		{
+		    int wx = x / SCREEN_MUL;
+		    if (wx > 127) wx = 127;
+		    row[right_start + x] = st_wing_right[wy][wx];
+		}
 	    }
 	}
 

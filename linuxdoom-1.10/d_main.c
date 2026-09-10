@@ -357,8 +357,8 @@ void D_Display (void)
 	if (automapactive)
 	    y = 4;
 	else
-	    y = viewwindowy+4;
-	V_DrawPatchDirect(viewwindowx+(scaledviewwidth-68)/2,
+	    y = (viewwindowy / SCREEN_MUL) + 4;
+	V_DrawPatchDirect((viewwindowx / SCREEN_MUL) + (scaledviewwidth / SCREEN_MUL - 69)/2,
 			  y,0,W_CacheLumpName ("M_PAUSE", PU_CACHE));
     }
 
