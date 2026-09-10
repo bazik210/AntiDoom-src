@@ -170,10 +170,10 @@ V_CopyRect
 	 
 #ifdef RANGECHECK 
     if (srcx<0
-	||srcx+width >BASE_WIDTH
+	||srcx+width >(SCREENWIDTH / SCREEN_MUL)
 	|| srcy<0
 	|| srcy+height>BASE_HEIGHT 
-	||destx<0||destx+width >BASE_WIDTH
+	||destx<0||destx+width >(SCREENWIDTH / SCREEN_MUL)
 	|| desty<0
 	|| desty+height>BASE_HEIGHT 
 	|| (unsigned)srcscrn>4
@@ -224,7 +224,7 @@ V_DrawPatch
     x -= SHORT(patch->leftoffset); 
 #ifdef RANGECHECK 
     if (x<0
-	||x+SHORT(patch->width) >BASE_WIDTH
+	||x+SHORT(patch->width) >(SCREENWIDTH / SCREEN_MUL)
 	|| y<0
 	|| y+SHORT(patch->height)>BASE_HEIGHT 
 	|| (unsigned)scrn>4)
@@ -295,7 +295,7 @@ V_DrawPatchFlipped
     x -= SHORT(patch->leftoffset); 
 #ifdef RANGECHECK 
     if (x<0
-	||x+SHORT(patch->width) >BASE_WIDTH
+	||x+SHORT(patch->width) >(SCREENWIDTH / SCREEN_MUL)
 	|| y<0
 	|| y+SHORT(patch->height)>BASE_HEIGHT 
 	|| (unsigned)scrn>4)

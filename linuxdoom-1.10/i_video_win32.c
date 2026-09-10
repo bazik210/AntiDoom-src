@@ -12,6 +12,9 @@
 #include "d_main.h"
 #include "doomdef.h"
 
+int SCREENWIDTH = 640;
+int widescreen = 0;
+
 static HWND win;
 static HBITMAP dib;
 static HDC dc;
@@ -370,10 +373,12 @@ void I_FinishUpdate(void)
         }
     GetClientRect(win, &r); outw = r.right; outh = r.bottom;
     if (M_CheckParm("-keepaspect")) {
-        if ((long long)outw * SCREENHEIGHT < (long long)outh * SCREENWIDTH) {
-            left = 0; outw = r.right; outh = outw * SCREENHEIGHT / SCREENWIDTH; top = (r.bottom - outh) / 2;
+        int aspect_num = widescreen ? 16 : 4;
+        int aspect_den = widescreen ? 9 : 3;
+        if ((long long)outw * aspect_den < (long long)outh * aspect_num) {
+            left = 0; outw = r.right; outh = outw * aspect_den / aspect_num; top = (r.bottom - outh) / 2;
         } else {
-            top = 0; outh = r.bottom; outw = outh * SCREENWIDTH / SCREENHEIGHT; left = (r.right - outw) / 2;
+            top = 0; outh = r.bottom; outw = outh * aspect_num / aspect_den; left = (r.right - outw) / 2;
         }
     } else {
         left = 0; top = 0; outw = r.right; outh = r.bottom;

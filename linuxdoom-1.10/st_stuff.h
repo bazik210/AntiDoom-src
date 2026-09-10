@@ -31,6 +31,7 @@
 // Now sensitive for scaling.
 #define ST_HEIGHT	32
 #define ST_WIDTH	BASE_WIDTH
+#define ST_X		((SCREENWIDTH / SCREEN_MUL - 320) / 2)
 #define ST_Y		(BASE_HEIGHT - ST_HEIGHT)
 
 

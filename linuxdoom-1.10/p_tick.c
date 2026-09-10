@@ -47,7 +47,7 @@ int	leveltime;
 
 
 // Both the head and tail of the thinker list.
-thinker_t	thinkercap;
+thinker_t	thinkercap = { { NULL }, &thinkercap, &thinkercap };
 
 
 //
@@ -177,7 +177,7 @@ void P_SaveInterpolationState(void)
     thinker_t* th;
     int i;
     memset(mobj_interp_table, 0, sizeof(mobj_interp_table));
-    for (th = thinkercap.next; th != &thinkercap; th = th->next)
+    for (th = thinkercap.next; th && th != &thinkercap; th = th->next)
     {
         if (th->function.acp1 == (actionf_p1)P_MobjThinker)
         {

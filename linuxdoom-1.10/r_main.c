@@ -100,7 +100,7 @@ int			viewangletox[FINEANGLES/2];
 // The xtoviewangleangle[] table maps a screen pixel
 // to the lowest viewangle that maps back to x ranges
 // from clipangle to -clipangle.
-angle_t			xtoviewangle[SCREENWIDTH+1];
+angle_t			xtoviewangle[MAX_SCREENWIDTH+1];
 
 
 // UNUSED.
@@ -552,10 +552,8 @@ void R_InitTextureMapping (void)
     //  viewangletox will give the next greatest x
     //  after the view angle.
     //
-    // Calc focallength
-    //  so FIELDOFVIEW angles covers SCREENWIDTH.
-    focallength = FixedDiv (centerxfrac,
-			    finetangent[FINEANGLES/4+FIELDOFVIEW/2] );
+    // Calc focallength - locked to vertical scale for Hor+ True Widescreen
+    focallength = projection;
 	
     for (i=0 ; i<FINEANGLES/2 ; i++)
     {
@@ -684,9 +682,14 @@ void R_ExecuteSetViewSize (void)
 	scaledviewwidth = SCREENWIDTH;
 	viewheight = SCREENHEIGHT;
     }
+    else if (setblocks == 10)
+    {
+	scaledviewwidth = SCREENWIDTH;
+	viewheight = SCREENHEIGHT - SBARHEIGHT;
+    }
     else
     {
-	scaledviewwidth = setblocks * (32 * SCREEN_MUL);
+	scaledviewwidth = (setblocks * SCREENWIDTH / 10) & ~(4 * SCREEN_MUL - 1);
 	viewheight = (setblocks * ((BASE_HEIGHT - 32) * SCREEN_MUL) / 10) & ~(4 * SCREEN_MUL - 1);
     }
     
@@ -697,7 +700,7 @@ void R_ExecuteSetViewSize (void)
     centerx = viewwidth/2;
     centerxfrac = centerx<<FRACBITS;
     centeryfrac = centery<<FRACBITS;
-    projection = centerxfrac;
+    projection = ((BASE_WIDTH * SCREEN_MUL / 2) * (setblocks > 10 ? 10 : setblocks) / 10) << FRACBITS;
 
     if (!detailshift)
     {
@@ -731,7 +734,7 @@ void R_ExecuteSetViewSize (void)
     {
 	dy = ((i-viewheight/2)<<FRACBITS)+FRACUNIT/2;
 	dy = abs(dy);
-	yslope[i] = FixedDiv ( (viewwidth<<detailshift)/2*FRACUNIT, dy);
+	yslope[i] = FixedDiv (projection, dy);
     }
 	
     for (i=0 ; i<viewwidth ; i++)

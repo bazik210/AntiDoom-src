@@ -49,7 +49,9 @@ rcsid[] = "$Id: r_draw.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 #define MAXHEIGHT			832
 
 // status bar height at bottom of screen
+#ifndef SBARHEIGHT
 #define SBARHEIGHT		(32 * SCREEN_MUL)
+#endif
 
 //
 // All drawing to the view buffer is accomplished in this file.
@@ -283,17 +285,17 @@ void R_DrawColumnLow (void)
 #define FUZZTABLE		50 
 #define FUZZOFF	(SCREENWIDTH)
 
-
-int	fuzzoffset[FUZZTABLE] =
+static const int fuzzsign[FUZZTABLE] =
 {
-    FUZZOFF,-FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,
-    FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,
-    FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,
-    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF 
-}; 
+    1,-1,1,-1,1,1,-1,
+    1,1,-1,1,1,1,-1,
+    1,1,1,-1,-1,-1,-1,
+    1,-1,-1,1,1,1,1,-1,
+    1,-1,1,1,-1,-1,1,
+    1,-1,-1,-1,-1,1,1,
+    1,1,-1,1,1,-1,1 
+};
+int	fuzzoffset[FUZZTABLE];
 
 int	fuzzpos = 0; 
 
@@ -745,6 +747,8 @@ R_InitBuffer
     // Column offset. For windows.
     for (i=0 ; i<width ; i++) 
 	columnofs[i] = viewwindowx + i;
+    for (i=0 ; i<FUZZTABLE ; i++)
+	fuzzoffset[i] = fuzzsign[i] * SCREENWIDTH;
 
     // Samw with base row offset.
     if (width == SCREENWIDTH) 

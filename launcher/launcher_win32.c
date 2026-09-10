@@ -40,6 +40,7 @@
 #define IDC_BTN_LANG        125
 #define IDC_CHK_SMOOTH      126
 #define IDC_CHK_UNCAPPED    127
+#define IDC_CHK_WIDESCREEN  128
 
 // Static Label IDs for dynamic translation
 #define IDC_LBL_IWAD        201
@@ -51,7 +52,7 @@
 #define IDC_LBL_EXTRA       207
 
 static HWND hIwadPath, hIwadPreset, hPwadPath;
-static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect, hChkSmooth, hChkUncapped;
+static HWND hResCombo, hChkFullscreen, hChkMaximized, hChkKeepAspect, hChkSmooth, hChkUncapped, hChkWidescreen;
 static HWND hChkBot, hChkMlook, hChkMenuMouse, hChkFast, hChkNoMonsters, hChkRespawn, hChkJUMP;
 static HWND hSkillCombo, hWarpEdit, hChkQuickStart, hExtraEdit, hChkCloseStart;
 static HWND hBtnLaunch, hBtnSave, hBtnExit, hIwadBrowse, hPwadBrowse, hBtnLang;
@@ -298,6 +299,7 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hChkFullscreen, L"Полный экран (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Окно без рамок (-maximized)");
         SetWindowTextW(hChkUncapped, L"Плавный FPS (Uncapped 144+) (-uncapped)");
+        SetWindowTextW(hChkWidescreen, L"Широкоформатный (16:9) (-widescreen)");
 
         SetWindowTextW(hChkBot, L"Включить бота (-bot)");
         SetWindowTextW(hChkMlook, L"Обзор мышью (-mlook)");
@@ -333,6 +335,7 @@ static void ApplyLanguage(int lang)
         SetWindowTextW(hChkFullscreen, L"Fullscreen Mode (-fullscreen)");
         SetWindowTextW(hChkMaximized, L"Borderless Window (-maximized)");
         SetWindowTextW(hChkUncapped, L"Smooth FPS (Uncapped 144+) (-uncapped)");
+        SetWindowTextW(hChkWidescreen, L"Widescreen (16:9) (-widescreen)");
 
         SetWindowTextW(hChkBot, L"Enable AI Bot (-bot)");
         SetWindowTextW(hChkMlook, L"Mouse Freelook (-mlook)");
@@ -416,6 +419,9 @@ static void SaveSettings(void)
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkUncapped, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Uncapped", buf, INI_FILE);
 
+    swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkWidescreen, BM_GETCHECK, 0, 0));
+    WritePrivateProfileStringW(L"Launcher", L"Widescreen", buf, INI_FILE);
+
     swprintf(buf, sizeof(buf)/sizeof(wchar_t), L"%d", (int)SendMessageW(hChkBot, BM_GETCHECK, 0, 0));
     WritePrivateProfileStringW(L"Launcher", L"Bot", buf, INI_FILE);
 
@@ -495,6 +501,7 @@ static void LoadSettings(void)
     SendMessageW(hChkKeepAspect, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"KeepAspect", 1, INI_FILE), 0);
     SendMessageW(hChkSmooth, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Smooth", 0, INI_FILE), 0);
     SendMessageW(hChkUncapped, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Uncapped", 1, INI_FILE), 0);
+    SendMessageW(hChkWidescreen, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Widescreen", 1, INI_FILE), 0);
 
     SendMessageW(hChkBot, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Bot", 0, INI_FILE), 0);
     SendMessageW(hChkMlook, BM_SETCHECK, GetPrivateProfileIntW(L"Launcher", L"Mlook", 1, INI_FILE), 0);
@@ -648,6 +655,12 @@ static void LaunchGame(HWND hWnd)
         wcscat(cmd, L" -capped");
     }
 
+    if (SendMessageW(hChkWidescreen, BM_GETCHECK, 0, 0)) {
+        wcscat(cmd, L" -widescreen");
+    } else {
+        wcscat(cmd, L" -nowidescreen");
+    }
+
     if (SendMessageW(hChkBot, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -bot");
     if (!SendMessageW(hChkMlook, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomlook");
     if (!SendMessageW(hChkMenuMouse, BM_GETCHECK, 0, 0)) wcscat(cmd, L" -nomenumouse");
@@ -777,7 +790,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         hChkSmooth = CreateWindowW(L"BUTTON", L"Сглаживание (Bilinear) (-smooth)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 250, 260, 20, hWnd, (HMENU)IDC_CHK_SMOOTH, NULL, NULL);
         hChkFullscreen = CreateWindowW(L"BUTTON", L"Полный экран (-fullscreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 274, 230, 20, hWnd, (HMENU)IDC_CHK_FULLSCREEN, NULL, NULL);
         hChkMaximized = CreateWindowW(L"BUTTON", L"Окно без рамок (-maximized)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 274, 260, 20, hWnd, (HMENU)IDC_CHK_MAXIMIZED, NULL, NULL);
-        hChkUncapped = CreateWindowW(L"BUTTON", L"Плавный FPS (Uncapped 144+) (-uncapped)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 298, 320, 20, hWnd, (HMENU)IDC_CHK_UNCAPPED, NULL, NULL);
+        hChkUncapped = CreateWindowW(L"BUTTON", L"Плавный FPS (Uncapped 144+) (-uncapped)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 298, 240, 20, hWnd, (HMENU)IDC_CHK_UNCAPPED, NULL, NULL);
+        hChkWidescreen = CreateWindowW(L"BUTTON", L"Широкоформатный (16:9) (-widescreen)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 275, 298, 260, 20, hWnd, (HMENU)IDC_CHK_WIDESCREEN, NULL, NULL);
 
         // Gameplay / AI Section
         hChkBot = CreateWindowW(L"BUTTON", L"Включить бота (-bot)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 25, 330, 230, 20, hWnd, (HMENU)IDC_CHK_BOT, NULL, NULL);

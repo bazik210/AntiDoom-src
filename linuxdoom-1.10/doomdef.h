@@ -106,13 +106,12 @@ typedef enum
 //  by the graphics.
 #define	SCREEN_MUL		2
 #define	INV_ASPECT_RATIO	0.625 // 0.75, ideally
+#define MAX_SCREENWIDTH		1120
 
-// Defines suck. C sucks.
-// C++ might sucks for OOP, but it sure is a better C.
-// So there.
-#define SCREENWIDTH  (BASE_WIDTH * SCREEN_MUL)
-//SCREEN_MUL*BASE_WIDTH //320
+extern int SCREENWIDTH;
+extern int widescreen;
 #define SCREENHEIGHT (BASE_HEIGHT * SCREEN_MUL)
+#define SBARHEIGHT   (32 * SCREEN_MUL)
 //(int)(SCREEN_MUL*BASE_WIDTH*INV_ASPECT_RATIO) //200
 
 

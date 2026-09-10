@@ -231,7 +231,7 @@ void D_DrawFPS (void)
     }
     
     int w = M_StringWidth(fps_str);
-    M_WriteText(BASE_WIDTH - w - 4, 4, fps_str);
+    M_WriteText((SCREENWIDTH / SCREEN_MUL) - w - 4, 4, fps_str);
 }
 fixed_t interp_frac = 0;           // 0..FRACUNIT interpolation fraction between ticks
 static unsigned long long last_tic_time_us = 0;
@@ -554,7 +554,15 @@ void D_PageDrawer (void)
         else if (W_CheckNumForName("TITLEPIC") >= 0) name = "TITLEPIC";
         else return;
     }
-    V_DrawPatch (0,0, 0, W_CacheLumpName(name, PU_CACHE));
+    if (widescreen)
+    {
+        memset(screens[0], 0, SCREENWIDTH * SCREENHEIGHT);
+        V_DrawPatch ((SCREENWIDTH / SCREEN_MUL - 320) / 2, 0, 0, W_CacheLumpName(name, PU_CACHE));
+    }
+    else
+    {
+        V_DrawPatch (0,0, 0, W_CacheLumpName(name, PU_CACHE));
+    }
 }
 
 
@@ -1187,6 +1195,17 @@ void D_DoomMain (void)
 	autostart = true;
     }
     
+    if (M_CheckParm ("-widescreen") && !M_CheckParm ("-nowidescreen"))
+    {
+        widescreen = 1;
+        SCREENWIDTH = 856;
+    }
+    else
+    {
+        widescreen = 0;
+        SCREENWIDTH = 640;
+    }
+
     // init subsystems
     printf ("V_Init: allocate screens.\n");
     V_Init ();
