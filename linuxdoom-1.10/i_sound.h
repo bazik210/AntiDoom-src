@@ -111,6 +111,7 @@ I_PlaySong
 void I_StopSong(int handle);
 // See above (register), then think backwards
 void I_UnRegisterSong(int handle);
+void I_WaitForMusic(int max_ms);
 
 
 

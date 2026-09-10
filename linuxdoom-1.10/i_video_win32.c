@@ -449,5 +449,19 @@ void I_FinishUpdate(void)
     if (left + outw < r.right) PatBlt(dc, left + outw, top, r.right - left - outw, outh, BLACKNESS);
 }
 
+extern int usegamma;
+extern byte gammatable[5][256];
+static byte raw_palette[768];
+
 void I_ReadScreen(byte *scr) { memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT); }
-void I_SetPalette(byte *pal) { memcpy(palette, pal, sizeof(palette)); }
+void I_SetPalette(byte *pal)
+{
+    int i;
+    int g = usegamma;
+    if (g < 0) g = 0;
+    if (g > 4) g = 4;
+    if (pal)
+        memcpy(raw_palette, pal, 768);
+    for (i = 0; i < 768; i++)
+        palette[i] = gammatable[g][raw_palette[i]];
+}

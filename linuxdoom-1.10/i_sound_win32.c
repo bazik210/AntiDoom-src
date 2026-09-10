@@ -85,15 +85,7 @@ void I_ShutdownSound(void)
 }
 void I_UpdateSound(void)
 {
-    static DWORD last_loop_check = 0;
-    DWORD now = GetTickCount();
-    if (music_playing && music_looping && !music_paused && (now - last_loop_check >= 500)) {
-        last_loop_check = now;
-        char mode[32];
-        if (mciSendStringA("status doom_bgm mode", mode, sizeof(mode), NULL) == 0) {
-            if (strcmp(mode, "stopped") == 0) mciSendStringA("play doom_bgm from 0", NULL, 0, NULL);
-        }
-    }
+    // MCI music looping is handled by the dedicated background music worker thread.
 }
 void I_SetChannels(void) { }
 void I_SetSfxVolume(int v) { snd_SfxVolume=v; }
@@ -228,6 +220,86 @@ static void reconvert_current_song(void)
     }
 }
 
+static HANDLE music_thread = NULL;
+static HANDLE music_wake_event = NULL;
+static volatile int shutdown_worker = 0;
+static volatile int desired_music_handle = 0;
+static volatile int desired_looping = 0;
+static volatile int desired_paused = 0;
+static char desired_mid_path[MAX_PATH] = {0};
+static int active_music_handle = 0;
+
+static DWORD WINAPI music_worker(LPVOID param)
+{
+    (void)param;
+    char open_cmd[512];
+    while (!shutdown_worker) {
+        WaitForSingleObject(music_wake_event, 500);
+        if (shutdown_worker) break;
+
+        int target_handle = desired_music_handle;
+        int target_looping = desired_looping;
+        int target_paused = desired_paused;
+        char target_path[MAX_PATH];
+        strncpy(target_path, desired_mid_path, sizeof(target_path) - 1);
+        target_path[sizeof(target_path) - 1] = '\0';
+
+        if (target_handle != active_music_handle) {
+            if (active_music_handle != 0) {
+                mciSendStringA("stop doom_bgm", NULL, 0, NULL);
+                mciSendStringA("close doom_bgm", NULL, 0, NULL);
+                active_music_handle = 0;
+            }
+
+            if (target_handle != 0 && target_path[0] != '\0' && snd_MusicVolume > 0) {
+                snprintf(open_cmd, sizeof(open_cmd), "open \"%s\" type sequencer alias doom_bgm", target_path);
+                MCIERROR oerr = mciSendStringA(open_cmd, NULL, 0, NULL);
+
+                // Critical cancellation check: if requested song changed while opening, cancel!
+                if (desired_music_handle != target_handle) {
+                    mciSendStringA("close doom_bgm", NULL, 0, NULL);
+                    continue;
+                }
+
+                if (oerr == 0) {
+                    if (!target_paused) {
+                        MCIERROR perr = mciSendStringA("play doom_bgm from 0", NULL, 0, NULL);
+                        if (perr == 0) {
+                            active_music_handle = target_handle;
+                            music_paused = false;
+                        }
+                    } else {
+                        active_music_handle = target_handle;
+                        music_paused = true;
+                    }
+                }
+            }
+        } else if (active_music_handle != 0) {
+            if (target_paused && !music_paused) {
+                mciSendStringA("pause doom_bgm", NULL, 0, NULL);
+                music_paused = true;
+            } else if (!target_paused && music_paused && snd_MusicVolume > 0) {
+                mciSendStringA("resume doom_bgm", NULL, 0, NULL);
+                music_paused = false;
+            } else if (target_looping && !music_paused) {
+                char mode[32];
+                if (mciSendStringA("status doom_bgm mode", mode, sizeof(mode), NULL) == 0) {
+                    if (strcmp(mode, "stopped") == 0) {
+                        mciSendStringA("play doom_bgm from 0", NULL, 0, NULL);
+                    }
+                }
+            }
+        }
+    }
+
+    if (active_music_handle != 0) {
+        mciSendStringA("stop doom_bgm", NULL, 0, NULL);
+        mciSendStringA("close doom_bgm", NULL, 0, NULL);
+        active_music_handle = 0;
+    }
+    return 0;
+}
+
 void I_SetMusicVolume(int v)
 {
     if (v > 15) return;
@@ -235,36 +307,90 @@ void I_SetMusicVolume(int v)
     if (v == snd_MusicVolume && music_playing && !music_paused) return;
     snd_MusicVolume = v;
     if (v == 0) {
-        if (music_playing && !music_paused) {
-            mciSendStringA("pause doom_bgm", NULL, 0, NULL);
-            music_paused = true;
-        }
+        desired_paused = 1;
+        music_paused = true;
+        if (music_wake_event) SetEvent(music_wake_event);
         return;
     }
-    if (music_playing && current_song_data && current_mid_path[0]) {
-        char pos[32] = "0";
-        if (music_paused) {
-            pos[0] = '0'; pos[1] = '\0';
-        } else {
-            mciSendStringA("status doom_bgm position", pos, sizeof(pos), NULL);
-        }
-        mciSendStringA("stop doom_bgm", NULL, 0, NULL);
-        mciSendStringA("close doom_bgm", NULL, 0, NULL);
-        reconvert_current_song();
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "open \"%s\" type sequencer alias doom_bgm", current_mid_path);
-        if (mciSendStringA(cmd, NULL, 0, NULL) == 0) {
-            snprintf(cmd, sizeof(cmd), "play doom_bgm from %s", pos);
-            mciSendStringA(cmd, NULL, 0, NULL);
-            music_paused = false;
-        }
+    desired_paused = 0;
+    music_paused = false;
+    if (music_wake_event) SetEvent(music_wake_event);
+}
+
+static void cleanup_temp_mid_files(void)
+{
+    char tmppath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmppath);
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%sdoom_bgm_*.mid", tmppath);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(pattern, &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            char filepath[MAX_PATH];
+            snprintf(filepath, sizeof(filepath), "%s%s", tmppath, fd.cFileName);
+            DeleteFileA(filepath);
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
     }
 }
 
-void I_InitMusic(void) { }
-void I_ShutdownMusic(void) { I_StopSong(0); I_UnRegisterSong(0); }
-void I_PauseSong(int h) { (void)h; mciSendStringA("pause doom_bgm", NULL, 0, NULL); music_paused = true; }
-void I_ResumeSong(int h) { (void)h; if (snd_MusicVolume > 0) { mciSendStringA("resume doom_bgm", NULL, 0, NULL); music_paused = false; } }
+void I_InitMusic(void)
+{
+    cleanup_temp_mid_files();
+    if (!music_wake_event)
+        music_wake_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    shutdown_worker = 0;
+    if (!music_thread)
+        music_thread = CreateThread(NULL, 0, music_worker, NULL, 0, NULL);
+}
+
+void I_WaitForMusic(int max_ms)
+{
+    if (!music_playing || desired_music_handle == 0) return;
+    int waited = 0;
+    while (active_music_handle != desired_music_handle && waited < max_ms) {
+        Sleep(20);
+        waited += 20;
+    }
+}
+
+void I_ShutdownMusic(void)
+{
+    I_StopSong(0);
+    shutdown_worker = 1;
+    if (music_wake_event)
+        SetEvent(music_wake_event);
+    if (music_thread) {
+        WaitForSingleObject(music_thread, 1000);
+        CloseHandle(music_thread);
+        music_thread = NULL;
+    }
+    if (music_wake_event) {
+        CloseHandle(music_wake_event);
+        music_wake_event = NULL;
+    }
+    cleanup_temp_mid_files();
+    I_UnRegisterSong(0);
+}
+
+void I_PauseSong(int h)
+{
+    (void)h;
+    desired_paused = 1;
+    music_paused = true;
+    if (music_wake_event) SetEvent(music_wake_event);
+}
+
+void I_ResumeSong(int h)
+{
+    (void)h;
+    if (snd_MusicVolume > 0) {
+        desired_paused = 0;
+        music_paused = false;
+        if (music_wake_event) SetEvent(music_wake_event);
+    }
+}
 
 int I_RegisterSong(void *data)
 {
@@ -274,7 +400,7 @@ int I_RegisterSong(void *data)
     if (memcmp(data, "MUS\x1a", 4) == 0) {
         unsigned short slen = *(unsigned short*)((char*)data + 4);
         unsigned short sstart = *(unsigned short*)((char*)data + 6);
-        current_song_len = slen + sstart + 16;
+        current_song_len = slen + sstart;
     }
     int out_len = 0; unsigned char *midi = NULL;
     if (current_song_len > 0) {
@@ -293,77 +419,33 @@ int I_RegisterSong(void *data)
     return current_music_handle;
 }
 
-static HANDLE music_thread = NULL;
-static char pending_mid_path[MAX_PATH] = {0};
-
-static DWORD WINAPI music_worker(LPVOID param)
-{
-    char path[MAX_PATH];
-    strncpy(path, pending_mid_path, sizeof(path) - 1);
-    path[sizeof(path) - 1] = '\0';
-
-    mciSendStringA("stop doom_bgm", NULL, 0, NULL);
-    mciSendStringA("close doom_bgm", NULL, 0, NULL);
-
-    if (snd_MusicVolume > 0 && path[0] != '\0') {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "open \"%s\" type sequencer alias doom_bgm", path);
-        MCIERROR oerr = mciSendStringA(cmd, NULL, 0, NULL);
-        MCIERROR perr = (oerr == 0) ? mciSendStringA("play doom_bgm from 0", NULL, 0, NULL) : 9999;
-        if (oerr == 0 && perr == 0) {
-            music_paused = false;
-        }
-    }
-    return 0;
-}
-
 void I_PlaySong(int h, int looping)
 {
     if (!h || current_mid_path[0] == '\0') return;
     music_playing = true;
     music_looping = (looping != 0);
-    if (snd_MusicVolume == 0) {
-        music_paused = true;
-        return;
-    }
-    strncpy(pending_mid_path, current_mid_path, sizeof(pending_mid_path) - 1);
-    pending_mid_path[sizeof(pending_mid_path) - 1] = '\0';
-
-    if (music_thread) {
-        WaitForSingleObject(music_thread, 200);
-        CloseHandle(music_thread);
-        music_thread = NULL;
-    }
-    music_thread = CreateThread(NULL, 0, music_worker, NULL, 0, NULL);
+    desired_music_handle = h;
+    desired_looping = (looping != 0);
+    desired_paused = (snd_MusicVolume == 0);
+    strncpy(desired_mid_path, current_mid_path, sizeof(desired_mid_path) - 1);
+    desired_mid_path[sizeof(desired_mid_path) - 1] = '\0';
+    if (music_wake_event) SetEvent(music_wake_event);
 }
 
 void I_StopSong(int h)
 {
     (void)h;
-    if (music_thread) {
-        WaitForSingleObject(music_thread, 200);
-        CloseHandle(music_thread);
-        music_thread = NULL;
-    }
-    mciSendStringA("stop doom_bgm", NULL, 0, NULL);
-    mciSendStringA("close doom_bgm", NULL, 0, NULL);
+    desired_music_handle = 0;
+    desired_mid_path[0] = '\0';
     music_playing = false;
     music_looping = false;
     music_paused = false;
+    if (music_wake_event) SetEvent(music_wake_event);
 }
 
 void I_UnRegisterSong(int h)
 {
     (void)h;
-    if (music_thread) {
-        WaitForSingleObject(music_thread, 300);
-        CloseHandle(music_thread);
-        music_thread = NULL;
-    }
-    if (current_mid_path[0]) {
-        DeleteFileA(current_mid_path);
-        current_mid_path[0] = '\0';
-    }
     current_song_data = NULL;
     current_song_len = 0;
     current_music_handle = 0;

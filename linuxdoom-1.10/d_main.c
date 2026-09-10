@@ -375,6 +375,10 @@ void D_Display (void)
     
     // wipe update
     wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
+	
+    if (gamestate == GS_LEVEL)
+        I_WaitForMusic(2500);
+
 
     wipestart = I_GetTime () - 1;
 
