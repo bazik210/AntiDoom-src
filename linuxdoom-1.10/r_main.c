@@ -861,6 +861,10 @@ void R_SetupFrame (player_t* player)
     
     viewplayer = player;
 
+    fixed_t cur_viewz = player->viewz;
+    if (cur_viewz <= 1 && player->mo)
+	cur_viewz = player->mo->z + player->viewheight;
+
     if (uncapped_fps && interp_frac < FRACUNIT)
     {
 	mobj_t *mo = player->mo;
@@ -870,9 +874,11 @@ void R_SetupFrame (player_t* player)
 	int old_ld;
 	P_GetMobjInterp(mo, &oldx, &oldy, &oldz, &oldangle);
 	P_GetPlayerInterp(player, &oldviewz, &old_ld);
+	if (oldviewz <= 1)
+	    oldviewz = cur_viewz;
 	viewx = oldx + FixedMul(mo->x - oldx, interp_frac);
 	viewy = oldy + FixedMul(mo->y - oldy, interp_frac);
-	viewz = oldviewz + FixedMul(player->viewz - oldviewz, interp_frac);
+	viewz = oldviewz + FixedMul(cur_viewz - oldviewz, interp_frac);
 	// Angle interpolation (handles unsigned wrapping correctly)
 	int angle_delta = (int)(mo->angle - oldangle);
 	viewangle = oldangle + (angle_t)FixedMul(angle_delta, interp_frac) + viewangleoffset;
@@ -882,7 +888,7 @@ void R_SetupFrame (player_t* player)
 	viewx = player->mo->x;
 	viewy = player->mo->y;
 	viewangle = player->mo->angle + viewangleoffset;
-	viewz = player->viewz;
+	viewz = cur_viewz;
     }
     extralight = player->extralight;
     

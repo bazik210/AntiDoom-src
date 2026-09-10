@@ -148,11 +148,6 @@ wipe_initMelt
     // copy start screen to main screen
     memcpy(wipe_scr, wipe_scr_start, width*height);
     
-    // makes this wipe faster (in theory)
-    // to have stuff in column-major format
-    wipe_shittyColMajorXform((short*)wipe_scr_start, width/2, height);
-    wipe_shittyColMajorXform((short*)wipe_scr_end, width/2, height);
-    
     // setup initial column positions
     // (y<0 => not ready to scroll yet)
     y = (int *) Z_Malloc(width*sizeof(int), PU_STATIC, 0);
@@ -164,7 +159,6 @@ wipe_initMelt
 	if (y[i] > 0) y[i] = 0;
 	else if (y[i] == -16) y[i] = -15;
     }
-    I_Log("wipe_initMelt: width=%d height=%d y[0]=%d y[100]=%d y[200]=%d y[319]=%d\n", width, height, y[0], y[100], y[200], y[319]);
 
     return 0;
 }
@@ -178,17 +172,10 @@ wipe_doMelt
     int		i;
     int		j;
     int		dy;
-    int		idx;
-    
-    short*	s;
-    short*	d;
     boolean	done = true;
 
-    width/=2;
     if (ticks <= 0)
         return 0;
-    int step = (height > 200) ? 16 : 8;
-    int ramp = (height > 200) ? 32 : 16;
 
     while (ticks--)
     {
@@ -200,25 +187,15 @@ wipe_doMelt
 	    }
 	    else if (y[i] < height)
 	    {
-		dy = (y[i] < ramp) ? y[i]+1 : step;
+		dy = (y[i] < 16) ? y[i]+1 : 8;
 		if (y[i]+dy >= height) dy = height - y[i];
-		s = &((short *)wipe_scr_end)[i*height+y[i]];
-		d = &((short *)wipe_scr)[y[i]*width+i];
-		idx = 0;
 		for (j=dy;j;j--)
-		{
-		    d[idx] = *(s++);
-		    idx += width;
-		}
+		    wipe_scr[(y[i] + dy - j) * width + i] =
+			wipe_scr_end[(y[i] + dy - j) * width + i];
 		y[i] += dy;
-		s = &((short *)wipe_scr_start)[i*height];
-		d = &((short *)wipe_scr)[y[i]*width+i];
-		idx = 0;
 		for (j=height-y[i];j;j--)
-		{
-		    d[idx] = *(s++);
-		    idx += width;
-		}
+		    wipe_scr[(y[i] + height - y[i] - j) * width + i] =
+			wipe_scr_start[(height - y[i] - j) * width + i];
 		done = false;
 	    }
 	}
@@ -227,7 +204,6 @@ wipe_doMelt
     done = true;
     for (i = 0; i < width; i++)
         if (y[i] < height) { done = false; break; }
-    I_Log("wipe_doMelt: ticks=%d done=%d y[0]=%d y[100]=%d y[200]=%d y[319]=%d\n", ticks, done, y[0], y[100], y[200], y[319]);
 
     return done;
 
@@ -239,8 +215,8 @@ wipe_exitMelt
   int	height,
   int	ticks )
 {
-    I_Log("wipe_exitMelt called: freeing y\n");
     Z_Free(y);
+    y = 0;
     return 0;
 }
 

@@ -692,6 +692,7 @@ P_SetupLevel
 
     Bot_InitLevel ();
     P_ClearInterpolation ();
+    P_SaveInterpolationState ();
 
     //printf ("free memory: 0x%x\n", Z_FreeMemory());
 

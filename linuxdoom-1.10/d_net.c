@@ -796,6 +796,13 @@ void TryRunTics_NonBlocking (void)
     if (realtics <= 0)
         return;  // No new tic yet - return for interpolated render
     
+    extern gamestate_t wipegamestate;
+    if (gamestate != wipegamestate)
+    {
+        oldentertics = entertic;
+        return;
+    }
+
     oldentertics = entertic;
     
     // get available tics

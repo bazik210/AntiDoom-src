@@ -164,7 +164,10 @@ void P_ClearInterpolation(void)
     memset(player_interp_table, 0, sizeof(player_interp_table));
     for (i = 0; i < MAXPLAYERS; i++)
     {
-        player_interp_table[i].oldviewz = players[i].viewz;
+        if (playeringame[i] && players[i].mo && players[i].viewz <= 1)
+            player_interp_table[i].oldviewz = players[i].mo->z + players[i].viewheight;
+        else
+            player_interp_table[i].oldviewz = players[i].viewz;
         player_interp_table[i].oldlookdir = 0;
     }
 }
@@ -197,7 +200,10 @@ void P_SaveInterpolationState(void)
     {
         if (playeringame[i])
         {
-            player_interp_table[i].oldviewz = players[i].viewz;
+            if (players[i].viewz <= 1 && players[i].mo)
+                player_interp_table[i].oldviewz = players[i].mo->z + players[i].viewheight;
+            else
+                player_interp_table[i].oldviewz = players[i].viewz;
             player_interp_table[i].oldlookdir = lookdir;
         }
     }

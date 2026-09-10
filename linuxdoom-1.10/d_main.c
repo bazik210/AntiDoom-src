@@ -202,10 +202,17 @@ extern void TryRunTics_NonBlocking(void);
 int uncapped_fps = 1;              // 1 = smooth rendering, 0 = classic 35 FPS lock
 int show_fps = 0;                  // 1 = display FPS counter on HUD, 0 = off
 
+static int fps_count = 0;
+static unsigned long long fps_last_time = 0;
+
+void D_ResetFPS (void)
+{
+    fps_count = 0;
+    fps_last_time = 0;
+}
+
 void D_DrawFPS (void)
 {
-    static int fps_count = 0;
-    static unsigned long long fps_last_time = 0;
     static int displayed_fps = 0;
     static char fps_str[32] = "FPS: 0";
     
@@ -253,7 +260,7 @@ void D_Display (void)
     redrawsbar = false;
     
     // change the view size if needed
-    if (setsizeneeded)
+    if (setsizeneeded || (gamestate != wipegamestate && gamestate == GS_LEVEL))
     {
 	R_ExecuteSetViewSize ();
 	oldgamestate = -1;                      // force background redraw
@@ -263,8 +270,8 @@ void D_Display (void)
     // save the current screen if about to wipe
     if (gamestate != wipegamestate)
     {
-	I_Log("D_Display WIPE START: gamestate=%d wipegamestate=%d gametic=%d viewheight=%d scaledviewwidth=%d menuactive=%d\n", gamestate, wipegamestate, gametic, viewheight, scaledviewwidth, menuactive);
 	wipe = true;
+	interp_frac = FRACUNIT;
 	wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
     }
     else
@@ -277,7 +284,7 @@ void D_Display (void)
     switch (gamestate)
     {
       case GS_LEVEL:
-	if (!gametic)
+	if (!gametic && !wipe)
 	    break;
 	if (automapactive)
 	    AM_Drawer ();
@@ -306,13 +313,13 @@ void D_Display (void)
     I_UpdateNoBlit ();
     
     // draw the view directly
-    if (gamestate == GS_LEVEL && !automapactive && gametic)
+    if (gamestate == GS_LEVEL && !automapactive && (gametic || wipe))
 	R_RenderPlayerView (&players[displayplayer]);
 
-    if (gamestate == GS_LEVEL && gametic)
+    if (gamestate == GS_LEVEL && (gametic || wipe))
 	HU_Drawer ();
 
-    if (show_fps && gamestate == GS_LEVEL)
+    if (show_fps && gamestate == GS_LEVEL && !wipe && !wiping)
 	D_DrawFPS ();
     
     // clean up border stuff
@@ -382,7 +389,6 @@ void D_Display (void)
 	wiping = true;
 	done = wipe_ScreenWipe(wipe_Melt
 			       , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
-	I_Log("Wipe step: tics=%d done=%d wiping=%d menuactive=%d\n", tics, done, wiping, menuactive);
 	I_UpdateNoBlit ();
 	if (menuactive && !wiping)
 	    M_Drawer ();                            // only draw popup menu if not wiping
@@ -395,18 +401,14 @@ void D_Display (void)
 	I_SubmitSound();
 #endif
     } while (!done);
-    I_Log("Wipe loop FINISHED: done=%d gamestate=%d wipegamestate=%d\n", done, gamestate, wipegamestate);
     wiping = false;
-    oldgamestate = -1;
-    if (gamestate == GS_LEVEL) {
-        ST_Drawer(viewheight == SCREENHEIGHT, true);
-        I_FinishUpdate();
-    }
+    interp_frac = FRACUNIT;
     eventhead = eventtail = 0;
     I_CaptureMouse(true);
     I_ResetMouse();
     extern void D_ResetTimer(void);
     D_ResetTimer();
+    D_ResetFPS();
     last_tic_time_us = I_GetTimeMicro();
     extern boolean level_weapon_ready;
     extern boolean prev_weapon_ready;
@@ -466,7 +468,12 @@ void D_DoomLoop (void)
 	}
 	else
 	{
-	    if (uncapped_fps)
+	    if (gameaction != ga_nothing || gamestate != wipegamestate)
+	    {
+	        TryRunTics (); // Process level change/restart synchronously
+	        last_tic_time_us = I_GetTimeMicro();
+	    }
+	    else if (uncapped_fps)
 	    {
 	        int pre_gametic = gametic;
 	        TryRunTics_NonBlocking();
@@ -480,7 +487,7 @@ void D_DoomLoop (void)
 	}
 		
 	// Calculate interpolation fraction for uncapped FPS
-	if (uncapped_fps && gamestate == GS_LEVEL && !paused && (netgame || !menuactive || demoplayback))
+	if (uncapped_fps && gamestate == GS_LEVEL && !paused && !wiping && (gamestate == wipegamestate) && (netgame || !menuactive || demoplayback))
 	{
 	    unsigned long long now_us = I_GetTimeMicro();
 	    unsigned long long elapsed = now_us - last_tic_time_us;
