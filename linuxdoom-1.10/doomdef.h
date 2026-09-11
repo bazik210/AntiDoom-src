@@ -272,6 +272,9 @@ typedef enum
 #define KEY_BACKSPACE	127
 #define KEY_PAUSE	0xff
 
+/* In-game developer console toggle (backtick/tilde key on Win32). */
+#define KEY_CONSOLE	96
+
 #define KEY_EQUALS	0x3d
 #define KEY_MINUS	0x2d
 

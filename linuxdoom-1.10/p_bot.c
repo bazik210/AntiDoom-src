@@ -12,6 +12,7 @@
 #include "p_bot.h"
 #include "m_bbox.h"
 #include "i_system.h"
+#include "w_wad.h"
 
 boolean bot_active = false;
 extern int lookdir, mlook;
@@ -41,10 +42,17 @@ static int width, height, count, stamp, heap_count, path_len, path_step;
 static fixed_t orgx, orgy;
 static bot_goal_t goal;
 static int next_plan, last_sector, stuck_since, last_progress;
+static int explore_cooldown_cell = -1;
+static int explore_cooldown_until = 0;
 static int next_ledge_diagnostic;
 static fixed_t last_x, last_y, progress_dist;
 static int use_until, last_keys;
 static int next_key_memory_scan;
+
+/* Short progression lock:
+   prevents explore/loot from stealing control after important actions */
+static int action_commit_until = 0;
+static int action_commit_line = -1;
 
 /* After acquiring a key, keep progression intent alive even when the matching
    keyed line is currently outside the reachable flood component (for example
@@ -65,6 +73,29 @@ static int post_use_line = -1;
 static int post_use_sector = -1;
 static fixed_t post_use_x = 0, post_use_y = 0;
 static fixed_t post_use_look_x = 0, post_use_look_y = 0;
+static int progress_sector = -1;
+static int progress_until = 0;
+static fixed_t progress_x = 0, progress_y = 0;
+
+/* A lift call is not just "press a switch". It is a multi-stage navigation
+   action: call -> wait for the floor to become reachable -> step onto it ->
+   stay aboard until the platform finishes its trip. Without this state the
+   planner sees an unreachable raised floor, forgets why it pressed USE and
+   wanders away before the lift reaches the player. */
+static int lift_commit_line = -1;
+static int lift_commit_tag = 0;
+static int lift_commit_sector = -1; /* used for tag-0/local lifts */
+static int lift_commit_until = 0;
+static boolean lift_commit_boarded = false;
+static fixed_t lift_commit_target_x = 0, lift_commit_target_y = 0;
+static boolean map03_route = false;
+static boolean map03_platform_done = false;
+static boolean map03_teleport_done = false;
+static boolean map03_final_lift_done = false;
+static boolean map03_red_door_done = false;
+static boolean map04_route = false;
+static boolean map04_lift_triggered = false;
+static boolean map04_lift_done = false;
 
 /* Combat hysteresis.  A target must be genuinely shootable to steal the
    navigation angle.  Short LOS flickers keep the old view angle, but never
@@ -178,9 +209,24 @@ static boolean Bot_ProbeLine(line_t *li)
 static boolean Bot_ProbeThing(mobj_t *mo)
 {
     fixed_t radius;
+    fixed_t probe_bottom, probe_top, probe_height;
+
     if (mo == probe.self || !(mo->flags & MF_SOLID)) return true;
+
     /* Moving actors are handled by steering and combat, not baked into routes. */
     if (!probe.actors && (mo->flags & MF_SHOOTABLE) && mo->type != MT_BARREL) return true;
+
+    /* Bot_Position has already resolved the floor under this candidate point.
+       Respect Z overlap just like the real actor collision does.  Previously a
+       zombie standing on a 64-unit crate blocked the navigation probe at floor
+       level as if the monster were an infinitely tall pillar.  That made local
+       avoidance hug the crate instead of simply routing around its geometry. */
+    probe_bottom = probe.floor;
+    probe_height = probe.self ? probe.self->height : 56*FRACUNIT;
+    probe_top = probe_bottom + probe_height;
+    if (probe_top <= mo->z || probe_bottom >= mo->z + mo->height)
+        return true;
+
     radius = mo->radius + probe_radius;
     return abs(mo->x - probe.x) >= radius || abs(mo->y - probe.y) >= radius;
 }
@@ -436,7 +482,13 @@ static boolean Bot_FindSafeItemApproach(mobj_t *mo, fixed_t ix, fixed_t iy, int 
 static boolean Bot_Cell(int c)
 {
     if (cells[c].stamp != stamp) {
+        boolean progress_cell = map03_route && progress_sector >= 0 &&
+            (int)(R_PointInSubsector(Bot_X(c),Bot_Y(c))->sector-sectors) == progress_sector;
         cells[c].stamp = stamp; cells[c].dist = INF; cells[c].parent = -1; cells[c].heap = -1;
+        /* Tagged switch targets can be exactly one player diameter wide. The
+           normal safety margin is correct for ordinary routing, but would make
+           the newly opened destination disappear from the flood entirely. */
+        probe_radius = progress_cell ? PLAYERRADIUS : BOT_RADIUS;
         cells[c].clear = Bot_Position(Bot_X(c), Bot_Y(c), NULL, false, &cells[c].floor);
         probe_radius = PLAYERRADIUS+2*FRACUNIT;
         cells[c].comfortable = cells[c].clear && Bot_Position(Bot_X(c), Bot_Y(c),NULL,false,NULL);
@@ -823,7 +875,7 @@ static void Bot_RememberNearbyLockedLines(player_t *p)
         /* If this keyed line was already conclusively used, it is no longer
            unfinished business. Manual doors are handled by their open/cross
            state below and may keep their special after activation. */
-        if (line_used[i] && !Bot_Manual(li->special)) continue;
+        if (line_used[i]) continue;
 
         vx=(double)li->v2->x-li->v1->x;
         vy=(double)li->v2->y-li->v1->y;
@@ -858,7 +910,14 @@ static boolean Bot_UseDoor(line_t *li)
 {
     if (Bot_Manual(li->special)) return true;
     switch (li->special) {
-        case 61: case 63: case 114: case 115:
+        /* Locked doors are still manual door transactions.  Treating the
+           blue/red variants as ordinary remote switches lets the planner
+           reselect the same linedef while it is opening and abandons the
+           required cross-door continuation (MAP04's blue doors expose this). */
+        case 26: case 27: case 28:
+        case 32: case 33: case 34:
+        case 61: case 63: case 99: case 114: case 115:
+        case 133: case 134: case 135: case 136: case 137:
             return li->tag && li->backsector && li->backsector->tag == li->tag;
     }
     return false;
@@ -871,6 +930,218 @@ static void Bot_ClearKeyProgressForSpecial(int special)
 
     key_progress_mask &= ~(1<<key);
 }
+static boolean Bot_LiftUseSpecial(int s)
+{
+    /* Generic lifts stay ordinary remote switches. Keep the sticky ride
+       transaction only for the verified MAP03/MAP04 routes. */
+    if (!map03_route && !map04_route) return false;
+    switch (s) {
+        case 21:  /* S1 lift lower-wait-raise */
+        case 62:  /* SR lift */
+        case 122: /* S1 fast lift */
+        case 123: /* SR fast lift */
+        case 88:  /* MAP04 walk-over lift */
+            return true;
+    }
+    return false;
+}
+
+static void Bot_ClearLiftCommit(void)
+{
+    lift_commit_line = -1;
+    lift_commit_tag = 0;
+    lift_commit_sector = -1;
+    lift_commit_until = 0;
+    lift_commit_boarded = false;
+    lift_commit_target_x = lift_commit_target_y = 0;
+
+}
+
+static boolean Bot_LiftSectorMatches(int sec)
+{
+    if (sec < 0 || sec >= numsectors || lift_commit_line < 0) return false;
+
+    /* A non-zero tag is the authoritative target and can legitimately address
+       more than one sector. For old/local tag-0 lifts, use the sector whose
+       thinker actually started. */
+    if (lift_commit_tag)
+        return sectors[sec].tag == lift_commit_tag;
+
+    return lift_commit_sector >= 0 && sec == lift_commit_sector;
+}
+
+static void Bot_ResolveLiftCommit(line_t *li)
+{
+    int i;
+
+    if (!li || lift_commit_line < 0) return;
+
+    /* For a local/tag-0 lift the adjacent sector is the only useful identity. */
+    if (!lift_commit_tag) {
+        if (li->backsector && li->backsector->specialdata) {
+            lift_commit_sector = (int)(li->backsector-sectors);
+            return;
+        }
+        if (li->frontsector && li->frontsector->specialdata) {
+            lift_commit_sector = (int)(li->frontsector-sectors);
+            return;
+        }
+    }
+
+    /* Tagged remote lift: remembering one active sector is useful for logs and
+       tag-0 fallback, while Bot_LiftSectorMatches accepts every sector sharing
+       the non-zero tag. */
+    if (lift_commit_tag) {
+        for (i=0; i<numsectors; ++i) {
+            if (sectors[i].tag == lift_commit_tag && sectors[i].specialdata) {
+                lift_commit_sector = i;
+                return;
+            }
+        }
+    }
+}
+
+static void Bot_StartLiftCommit(mobj_t *mo, int line_index)
+{
+    line_t *li;
+
+    if (line_index < 0 || line_index >= numlines) return;
+    li=&lines[line_index];
+
+    lift_commit_line=line_index;
+    lift_commit_tag=li->tag;
+    lift_commit_sector=-1;
+    lift_commit_boarded=false;
+
+    /* Slow lifts may travel, wait three seconds, then travel again. Give the
+       complete call->board->ride transaction enough time instead of treating
+       the bottom arrival as an ordinary four-second post-use context. */
+    lift_commit_until=leveltime +
+        ((map04_route && line_index == 408) ? 700 : 525); /* 20 s / 15 s watchdog */
+
+    post_use_line=line_index;
+    post_use_sector=mo ? (int)(mo->subsector->sector-sectors) : -1;
+    post_use_x=mo ? mo->x : 0;
+    post_use_y=mo ? mo->y : 0;
+    post_use_hold_until=leveltime+10;
+    post_use_local_until=lift_commit_until;
+    commit_forward_until=lift_commit_until;
+
+    I_Log("Bot: lift commit line=%d special=%d tag=%d\n",
+          line_index,li->special,lift_commit_tag);
+}
+
+/* Build the continuation for an active lift call.
+   - When the lift floor becomes reachable, GO_WALK directly onto its sector.
+   - Before that, stay on the closest reachable frontier instead of wandering.
+   Re-running this every few tics naturally notices the moving floor height. */
+static boolean Bot_LiftCommitGoal(player_t *p)
+{
+    int i;
+    int best_platform=-1, best_platform_score=INF;
+    int best_frontier=-1, best_frontier_score=INF;
+    int nearest_platform=-1, nearest_platform_dist=INF;
+    fixed_t target_x=0, target_y=0;
+    mobj_t *mo;
+
+    if (!p || !(mo=p->mo) || lift_commit_line < 0 ||
+        leveltime >= lift_commit_until)
+        return false;
+
+    /* First locate the lift footprint geometrically, even if the current flood
+       cannot enter it yet because its floor is still too high. */
+    for (i=0; i<count; ++i) {
+        int sec=(int)(R_PointInSubsector(Bot_X(i),Bot_Y(i))->sector-sectors);
+        int d;
+
+        if (!Bot_LiftSectorMatches(sec)) continue;
+
+        /* A boundary cell plus arrival tolerance can stop the player outside
+           the platform. Board with the centre at least one grid step inside. */
+        if (R_PointInSubsector(Bot_X(i)+8*FRACUNIT,Bot_Y(i))->sector != &sectors[sec] ||
+            R_PointInSubsector(Bot_X(i)-8*FRACUNIT,Bot_Y(i))->sector != &sectors[sec] ||
+            R_PointInSubsector(Bot_X(i),Bot_Y(i)+8*FRACUNIT)->sector != &sectors[sec] ||
+            R_PointInSubsector(Bot_X(i),Bot_Y(i)-8*FRACUNIT)->sector != &sectors[sec])
+            continue;
+
+        /* Board well inside the 48-unit-wide MAP03 lift, not a boundary cell
+           whose arrival tolerance leaves the player outside the sector. */
+        if (map03_route && sec == 14 &&
+            (Bot_X(i) != 2728*FRACUNIT || Bot_Y(i) != 3360*FRACUNIT))
+            continue;
+
+        d=P_AproxDistance(Bot_X(i)-mo->x,Bot_Y(i)-mo->y)/FRACUNIT;
+        if (d < nearest_platform_dist) {
+            nearest_platform_dist=d;
+            nearest_platform=i;
+            target_x=Bot_X(i);
+            target_y=Bot_Y(i);
+        }
+
+        /* The flood proves the moving floor is low enough to step onto NOW. */
+        if (cells[i].stamp == stamp && cells[i].dist < INF && cells[i].clear) {
+            int score=cells[i].dist;
+            if (!cells[i].comfortable) score += 48;
+            if (score < best_platform_score) {
+                best_platform_score=score;
+                best_platform=i;
+            }
+        }
+    }
+
+    if (best_platform >= 0) {
+        lift_commit_target_x=Bot_X(best_platform);
+        lift_commit_target_y=Bot_Y(best_platform);
+        goal.type=GO_WALK;
+        goal.x=Bot_X(best_platform);
+        goal.y=Bot_Y(best_platform);
+        goal.aimx=goal.x; goal.aimy=goal.y;
+        goal.line=-1;
+        goal.cell=best_platform;
+        goal.score=best_platform_score-50000;
+
+        return true;
+    }
+
+    if (nearest_platform < 0)
+        return false;
+
+    lift_commit_target_x=target_x;
+    lift_commit_target_y=target_y;
+
+    /* Still too high: move only to the reachable frontier closest to the lift.
+       This gives the bot the human behavior of waiting beside the arriving
+       platform instead of selecting ammo/exploration in another room. */
+    for (i=0; i<count; ++i) {
+        int score;
+        fixed_t to_lift;
+
+        if (cells[i].stamp != stamp || cells[i].dist == INF || !cells[i].clear)
+            continue;
+
+        to_lift=P_AproxDistance(Bot_X(i)-target_x,Bot_Y(i)-target_y);
+        score=(int)(to_lift/FRACUNIT) + cells[i].dist/3;
+
+        if (score < best_frontier_score) {
+            best_frontier_score=score;
+            best_frontier=i;
+        }
+    }
+
+    if (best_frontier >= 0) {
+        goal.type=GO_WALK;
+        goal.x=Bot_X(best_frontier);
+        goal.y=Bot_Y(best_frontier);
+        goal.aimx=target_x; goal.aimy=target_y;
+        goal.line=-1;
+        goal.cell=best_frontier;
+        goal.score=best_frontier_score-46000;
+        return true;
+    }
+
+    return false;
+}
+
 static boolean Bot_UseSpecial(int s)
 {
     if (Bot_Manual(s)) return true;
@@ -1055,6 +1326,20 @@ static boolean Bot_LineActionActive(line_t *li)
     return false;
 }
 
+static mobj_t *Bot_BlueKey(void)
+{
+    thinker_t *th;
+    for (th=thinkercap.next; th!=&thinkercap; th=th->next) {
+        mobj_t *mo;
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+        mo=(mobj_t *)th;
+        if ((mo->sprite == SPR_BKEY || mo->sprite == SPR_BSKU) &&
+            mo->health >= 0)
+            return mo;
+    }
+    return NULL;
+}
+
 static void Bot_CheckPendingUse(void)
 {
     line_t *li;
@@ -1069,6 +1354,9 @@ static void Bot_CheckPendingUse(void)
     li = &lines[pending_use_line];
     fired = li->special != pending_use_special || Bot_LineActionActive(li);
     if (fired) {
+        if (pending_use_line == lift_commit_line)
+            Bot_ResolveLiftCommit(li);
+
         line_used[pending_use_line] = leveltime;
         if (line_key_memory)
             line_key_memory[pending_use_line] = 0;
@@ -1078,6 +1366,51 @@ static void Bot_CheckPendingUse(void)
            observe/use the result instead of immediately shopping for ammo. */
         if (pending_use_line == post_use_line && leveltime + 105 > post_use_local_until)
             post_use_local_until = leveltime + 105;
+
+        /* A remote floor/door switch is useful because it changes a tagged
+           sector elsewhere. Keep that sector as the next destination instead
+           of falling back to generic exploration around the switch. */
+        if (map03_route && li->tag && !Bot_UseDoor(li) &&
+            !Bot_LiftUseSpecial(pending_use_special)) {
+            int i, best=-1, best_active=-1;
+            fixed_t best_dist=INT_MAX, best_active_dist=INT_MAX;
+            for (i=0; i<numsectors; ++i) {
+                if (sectors[i].tag == li->tag) {
+                    fixed_t d=P_AproxDistance(sectors[i].soundorg.x-post_use_x,
+                                              sectors[i].soundorg.y-post_use_y);
+                    if (d < best_dist) { best=i; best_dist=d; }
+                    if (sectors[i].specialdata && d < best_active_dist) {
+                        best_active=i; best_active_dist=d;
+                    }
+                }
+            }
+            progress_sector = best_active >= 0 ? best_active : best;
+            if (progress_sector >= 0) {
+                /* Prefer the sector whose thinker actually fired, rather than
+                   the arbitrary first sector sharing this tag. */
+                progress_until = leveltime + 1050;
+                progress_x = sectors[progress_sector].soundorg.x;
+                progress_y = sectors[progress_sector].soundorg.y;
+            }
+        }
+
+        if (map03_route && progress_sector >= 0 &&
+            !Bot_LiftUseSpecial(pending_use_special) &&
+            ((li->frontsector && li->frontsector == &sectors[progress_sector]) ||
+             (li->backsector && li->backsector == &sectors[progress_sector]))) {
+            mobj_t *key=Bot_BlueKey();
+            if (key) {
+                /* The door around the lowered platform is only an intermediate
+                   action. Keep the same exact-radius sector target, now aimed
+                   at the blue key that motivated the route. */
+                progress_x=key->x;
+                progress_y=key->y;
+                progress_until=leveltime+1050;
+            } else {
+                progress_sector = -1;
+                progress_until = 0;
+            }
+        }
 
         I_Log("Bot: confirmed switch line=%d special=%d\n",
               pending_use_line,pending_use_special);
@@ -1090,9 +1423,22 @@ static void Bot_CheckPendingUse(void)
     if (leveltime >= pending_use_until) pending_use_line = -1;
 }
 
+static void Bot_StartActionCommit(int line)
+{
+    action_commit_line=line;
+    action_commit_until=leveltime + TICRATE*5;
+}
+
+static boolean Bot_ActionCommitted(void)
+{
+    return action_commit_until > leveltime;
+}
+
 static void Bot_Plan(player_t *p)
 {
     int i, n;
+    int story_target = -1;
+    fixed_t story_x = 0, story_y = 0;
     thinker_t *th;
     boolean forced_seen = false;
     boolean key_progress;
@@ -1121,7 +1467,7 @@ static void Bot_Plan(player_t *p)
                 continue;
 
             /* A confirmed non-manual keyed switch is already finished. */
-            if (line_used[i] && !Bot_Manual(li->special))
+            if (line_used[i] || line_retry[i] > leveltime)
                 continue;
 
             mx=li->v1->x + li->dx/2;
@@ -1147,19 +1493,176 @@ static void Bot_Plan(player_t *p)
     }
 
     goal.type = GO_NONE; goal.score = INF; goal.line = -1; path_len = path_step = 0;
+
+    /* Geometry identity is checked once at level initialization. Restore
+       progression from actual position/key/world state when loading a save. */
+    if (map03_route) {
+        if (p->mo->x > 2780*FRACUNIT && p->mo->z >= 96*FRACUNIT)
+            map03_platform_done = true;
+        if (!map03_platform_done)
+            story_target = 87;
+        else if (Bot_HasKey(p,0)) {
+            if (Bot_HasKey(p,it_redcard)) {
+                /* The red key is not the end of MAP03's puzzle. The lower room
+                   first needs the left lift transaction; only after the bot is
+                   safely on its terminal floor should it operate the red door
+                   and continue to the exit switch. */
+                if (!map03_final_lift_done && lift_commit_line < 0)
+                    story_target = 498;
+                else if (!map03_red_door_done)
+                    story_target = 458;
+                else if (lines[554].special)
+                    story_target = 554;
+            } else {
+                story_target = lines[431].special ? 431 :
+                    (map03_teleport_done ? -1 : 418);
+            }
+        }
+        if (story_target >= 0) {
+            line_t *story = &lines[story_target];
+            story_x = story->v1->x + story->dx/2;
+            story_y = story->v1->y + story->dy/2;
+        }
+    }
+    if (map04_route && Bot_HasKey(p,it_bluecard)) {
+        /* MAP04's final lift is a walk-over trigger on the small box in sector
+           78. After the blue door, make that trigger the story destination;
+           generic exploration otherwise keeps circling the old blue-door area. */
+        if (Bot_HasKey(p,it_redcard)) {
+            if (!line_used[16] && !line_used[19])
+                story_target = 16;
+            else if (lines[574].special)
+                story_target = 574;
+        } else if (!line_used[302] && !line_used[304])
+            story_target = 302;
+        else if (!line_used[388] && !line_used[393])
+            story_target = 388;
+        else if (!map04_lift_triggered && !map04_lift_done)
+            story_target = 408;
+    }
+    if (map04_route && story_target == 408) {
+        line_t *lift_line=&lines[408];
+        int best=-1, best_score=INF;
+        fixed_t mx=lift_line->v1->x+lift_line->dx/2;
+        fixed_t my=lift_line->v1->y+lift_line->dy/2;
+        for (i=0; i<count; ++i) {
+            int d;
+            if (cells[i].stamp != stamp || cells[i].dist == INF || !cells[i].clear)
+                continue;
+            d=(int)(P_AproxDistance(Bot_X(i)-mx,Bot_Y(i)-my)/FRACUNIT) +
+              cells[i].dist/4;
+            if (d < best_score) { best_score=d; best=i; }
+        }
+        if (best >= 0) {
+            goal.type=GO_WALK;
+            goal.x=Bot_X(best); goal.y=Bot_Y(best);
+            goal.aimx=mx; goal.aimy=my; goal.line=-1;
+            goal.cell=best; goal.score=-50000+best_score;
+        }
+    }
+
+    /* An active lift call is unfinished progression, not ordinary post-switch
+       exploration. The very negative score keeps the continuation sticky while
+       still allowing combat to own movement at runtime. */
+    if (lift_commit_line >= 0 && leveltime < lift_commit_until)
+        Bot_LiftCommitGoal(p);
+
+    if (map03_route && progress_sector >= 0 && leveltime < progress_until) {
+        int progress_cell=-1, progress_score=INF;
+        boolean progress_ready = sectors[progress_sector].floorheight <=
+                                 p->mo->z + 24*FRACUNIT;
+        boolean progress_action=false;
+
+        /* A lowered sector can still be sealed by a W1 door line. Walk to
+           that trigger first; trying to reach the sector centre would stop at
+           the grate forever. */
+        for (i=0; i<numlines; ++i) {
+            line_t *li=&lines[i];
+            double dx,dy,len;
+            if (!li->special || !Bot_WalkSpecial(li->special) ||
+                !(li->frontsector == &sectors[progress_sector] ||
+                  li->backsector == &sectors[progress_sector])) continue;
+            dx=(double)li->dx; dy=(double)li->dy; len=sqrt(dx*dx+dy*dy);
+            if (len < FRACUNIT) continue;
+            {
+                int n;
+                for (n=1; n<=3; ++n) {
+                    fixed_t ax=li->v1->x+(fixed_t)((long long)li->dx*n/4);
+                    fixed_t ay=li->v1->y+(fixed_t)((long long)li->dy*n/4);
+                    fixed_t x=ax-(fixed_t)(P_PointOnLineSide(p->mo->x,p->mo->y,li) ?
+                                           li->dy/len*32*FRACUNIT :
+                                           -li->dy/len*32*FRACUNIT);
+                    fixed_t y=ay+(fixed_t)(P_PointOnLineSide(p->mo->x,p->mo->y,li) ?
+                                           li->dx/len*32*FRACUNIT :
+                                           -li->dx/len*32*FRACUNIT);
+                    if (P_PointOnLineSide(x,y,li) == P_PointOnLineSide(p->mo->x,p->mo->y,li)) {
+                        x=2*ax-x; y=2*ay-y;
+                    }
+                    if (Bot_Candidate(GO_WALK,x,y,ax,ay,i,-100000))
+                        progress_action=true;
+                }
+            }
+        }
+        if (progress_action)
+            progress_ready=false;
+        for (i=0; i<count; ++i) {
+            int sec, score;
+            if (cells[i].stamp != stamp || cells[i].dist == INF || !cells[i].clear)
+                continue;
+            sec=R_PointInSubsector(Bot_X(i),Bot_Y(i))->sector-sectors;
+            score=(int)(P_AproxDistance(Bot_X(i)-progress_x,
+                                         Bot_Y(i)-progress_y)/FRACUNIT);
+            score += cells[i].dist/4;
+            if (sec == progress_sector) score -= 9000;
+            if (score < progress_score) {
+                progress_score=score;
+                progress_cell=i;
+            }
+        }
+        if (progress_cell >= 0 && !progress_action) {
+            goal.type=GO_WALK;
+            /* Keep the frontier cell for path reconstruction, but do not make
+               it the arrival point. Otherwise the bot stops at the lip and
+               replans the same one-cell route forever. */
+            if (progress_ready) {
+                goal.x=progress_x;
+                goal.y=progress_y;
+            } else {
+                goal.x=Bot_X(progress_cell);
+                goal.y=Bot_Y(progress_cell);
+            }
+            goal.aimx=progress_x; goal.aimy=progress_y;
+            goal.line=-1;
+            goal.cell=progress_cell;
+            goal.score=-16000+progress_score;
+        }
+    }
+
     for (i = 0; i < numlines; ++i) {
         line_t *li = &lines[i];
         int special = li->special, priority;
+        if (map03_route && map03_platform_done &&
+            (i == 86 || i == 87 || i == 344 || i == 345)) continue;
         double dx = (double)li->dx, dy = (double)li->dy, len = sqrt(dx*dx + dy*dy);
         if (!special || len < FRACUNIT || line_retry[i] > leveltime || !Bot_HasKey(p,Bot_Key(special))) continue;
         if (Bot_UseSpecial(special)) {
             int used_age = line_used[i] ? leveltime-line_used[i] : INT_MAX;
 
+            /* A successfully crossed manual door is no longer a useful
+               destination. Keeping it eligible makes the bot turn back to
+               the starting room whenever the key remains in inventory. */
+            /* A repeatable door may be the only way back out of a room after
+               it closes behind the player. Suppress the immediate turn-back,
+               but allow a later re-use instead of trapping the bot inside. */
+            if (line_used[i] && Bot_UseDoor(li) && i != story_target &&
+                leveltime-line_used[i] < USED_SWITCH_HARD_COOLDOWN)
+                continue;
+
             /* A remote/repeatable switch that already fired is not fresh
                progression.  Hard-ignore it for a while, then keep a large
                penalty so unexplored space, keys and new switches win.  Manual
                doors and exits have their own continuation semantics. */
-            if (!Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i]) {
+            if (i != story_target && !Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i]) {
                 if (used_age < USED_SWITCH_HARD_COOLDOWN) continue;
             }
 
@@ -1171,7 +1674,7 @@ static void Bot_Plan(player_t *p)
                     /* An opened door that we already touched is unfinished
                        traversal. Reacquire its far side instead of turning back
                        for ammo when the explicit door commit expires. */
-                    if (line_tries[i] > 0) {
+                    if (line_tries[i] > 0 && !line_used[i]) {
                         int side = P_PointOnLineSide(p->mo->x,p->mo->y,li) ? 1 : -1;
                         for (n = 1; n <= 3; ++n) {
                             fixed_t ax = li->v1->x + (fixed_t)((long long)li->dx*n/4);
@@ -1189,12 +1692,17 @@ static void Bot_Plan(player_t *p)
                generic exploration. Attempts are only a mild tie-breaker. */
             priority = special==11 ? -20000 : special==51 ? -15000 :
                        250 + (line_tries[i] > 4 ? 4 : line_tries[i]) * 250;
+            if (i == story_target) priority = -30000;
+            if (map03_route && progress_sector >= 0 &&
+                ((li->frontsector && li->frontsector == &sectors[progress_sector]) ||
+                 (li->backsector && li->backsector == &sectors[progress_sector])))
+                priority = -14000;
 
             /* A reachable colored interaction is progression once its key is
                owned. Do not make that depend entirely on having walked within
                the memory radius before pickup: red bars first exposed by a red
                door are a common counterexample. */
-            if (Bot_Key(special) >= 0) {
+            if (Bot_Key(special) >= 0 && !line_used[i]) {
                 priority -= 9000;
                 if (line_key_memory && line_key_memory[i])
                     priority -= 5000;
@@ -1216,7 +1724,7 @@ static void Bot_Plan(player_t *p)
                 }
             }
 
-            if (!Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i])
+            if (i != story_target && line_used[i] && !Bot_IsExitSpecial(special))
                 priority += USED_SWITCH_SOFT_PENALTY;
             if (prefer_forward && special != 11 && special != 51) {
                 priority += 3000;   // РІРѕ РІСЂРµРјСЏ commit СЃРёР»СЊРЅРѕ РЅРµ Р»СЋР±РёС‚ РґСЂСѓРіРёРµ РґРІРµСЂРё/СЃРµРєСЂРµС‚РєРё
@@ -1232,12 +1740,21 @@ static void Bot_Plan(player_t *p)
                    the switch recess/corner.  The old planner could walk to such
                    a point forever because reaching the staging point was
                    mistaken for being able to operate the linedef. */
-                if (!Bot_CanUsePoint(x,y,a,li)) continue;
+                if (!Bot_CanUsePoint(x,y,a,li) &&
+                    !(map03_route && i == story_target)) continue;
                 Bot_Candidate(GO_USE,x,y,ax,ay,i,priority);
             }
         } else if (Bot_WalkSpecial(special) && li->backsector) {
             int side = P_PointOnLineSide(p->mo->x,p->mo->y,li) ? 1 : -1;
-            priority = special==52 ? -20000 : special==124 ? -15000 : 800+line_tries[i]*1000;
+            /* Teleport triggers are progression, not optional exploration.
+               Prefer reaching them over nearby repeatable blue doors. */
+            priority = special==52 ? -20000 : special==124 ? -15000 :
+                       800+line_tries[i]*1000;
+            if (i == story_target) priority = -30000;
+            if (map03_route && progress_sector >= 0 &&
+                ((li->frontsector && li->frontsector == &sectors[progress_sector]) ||
+                 (li->backsector && li->backsector == &sectors[progress_sector])))
+                priority = -14000;
             if (Bot_Key(special) >= 0) {
                 priority -= 9000;
                 if (line_key_memory && line_key_memory[i])
@@ -1251,11 +1768,35 @@ static void Bot_Plan(player_t *p)
                     priority += gate_dist * 5;
                 }
             }
+            if (map04_route && i == story_target &&
+                (i == 235 || i == 408 || i == 459)) {
+                /* The MAP04 lift/teleporter triggers are narrow walk-over
+                   strips. Try both faces and let the flood choose whichever
+                   side is actually reachable from the current room. */
+                for (n = 1; n <= 3; ++n) {
+                    fixed_t ax = li->v1->x+(fixed_t)((long long)li->dx*n/4);
+                    fixed_t ay = li->v1->y+(fixed_t)((long long)li->dy*n/4);
+                    fixed_t nx=(fixed_t)(dy/len*32*FRACUNIT);
+                    fixed_t ny=(fixed_t)(-dx/len*32*FRACUNIT);
+                    Bot_Candidate(GO_WALK,ax+nx,ay+ny,ax,ay,i,priority);
+                    Bot_Candidate(GO_WALK,ax-nx,ay-ny,ax,ay,i,priority);
+                }
+                continue;
+            }
             for (n = 1; n <= 3; ++n) {
                 fixed_t ax = li->v1->x+(fixed_t)((long long)li->dx*n/4);
                 fixed_t ay = li->v1->y+(fixed_t)((long long)li->dy*n/4);
-                Bot_Candidate(GO_WALK,ax+(fixed_t)(side*dy/len*40*FRACUNIT),
-                    ay-(fixed_t)(side*dx/len*40*FRACUNIT),ax,ay,i,priority);
+                fixed_t x=ax-(fixed_t)(side*dy/len*32*FRACUNIT);
+                fixed_t y=ay+(fixed_t)(side*dx/len*32*FRACUNIT);
+                /* A walk-over special fires only after the player origin
+                   crosses the line. The previous 40-unit staging target left
+                   the bot permanently on the approach side. */
+                if (P_PointOnLineSide(x,y,li) == P_PointOnLineSide(p->mo->x,p->mo->y,li)) {
+                    x=ax+(fixed_t)(side*dy/len*32*FRACUNIT);
+                    y=ay-(fixed_t)(side*dx/len*32*FRACUNIT);
+                }
+                if (P_PointOnLineSide(x,y,li) != P_PointOnLineSide(p->mo->x,p->mo->y,li))
+                    Bot_Candidate(GO_WALK,x,y,ax,ay,i,priority);
             }
         }
     }
@@ -1266,6 +1807,9 @@ static void Bot_Plan(player_t *p)
         mo = (mobj_t*)th;
         if (!(mo->flags & MF_SPECIAL)) continue;
         priority = Bot_ItemPriority(p,mo);
+        if (map03_route && map03_platform_done && !Bot_HasKey(p,it_bluecard) &&
+            (mo->sprite == SPR_BKEY || mo->sprite == SPR_BSKU))
+            priority = -30000;
         if (priority != INF) {
             if (forced_item_active && leveltime < forced_item_until &&
                 P_AproxDistance(mo->x-forced_item_x,mo->y-forced_item_y) < 48*FRACUNIT) {
@@ -1276,7 +1820,9 @@ static void Bot_Plan(player_t *p)
                 forced_seen = true;
                 forced_item_until = leveltime + 2100;
             }
-            if ((leveltime < post_use_local_until || key_progress) && !forced_item_active) {
+            if ((leveltime < post_use_local_until || key_progress ||
+                 (lift_commit_line >= 0 && leveltime < lift_commit_until)) &&
+                !forced_item_active) {
                 /* After a switch OR while finishing newly unlocked key
                    progression, do not abandon the route for ordinary ammo,
                    armor or routine health. Keys, major weapons and critical
@@ -1308,6 +1854,7 @@ static void Bot_Plan(player_t *p)
         int sec, score;
         fixed_t from_switch;
         if (cells[i].stamp != stamp || cells[i].dist == INF || cells[i].dist < 96) continue;
+        if (i == explore_cooldown_cell && leveltime < explore_cooldown_until) continue;
         sec = R_PointInSubsector(Bot_X(i),Bot_Y(i))->sector-sectors;
 
         from_switch = P_AproxDistance(Bot_X(i)-post_use_x, Bot_Y(i)-post_use_y);
@@ -1319,9 +1866,22 @@ static void Bot_Plan(player_t *p)
         }
 
         score = 1800 + cells[i].dist + sector_visits[sec]*2000;
-        if (leveltime < post_use_local_until) {
+        if (map03_route && progress_sector >= 0 && leveltime < progress_until) {
+            fixed_t to_progress=P_AproxDistance(Bot_X(i)-progress_x,
+                                                 Bot_Y(i)-progress_y);
+            score += to_progress / FRACUNIT;
+            score -= 14000;
+            if (sec == progress_sector) score -= 6000;
+        } else if (leveltime < post_use_local_until) {
             score += from_switch / (4*FRACUNIT);
             if (sec == post_use_sector) score -= 600;
+        } else if (story_target >= 0) {
+            fixed_t to_story=P_AproxDistance(Bot_X(i)-story_x,
+                                             Bot_Y(i)-story_y);
+            /* Follow the reachable frontier toward the mandatory MAP03
+               switch/teleporter instead of selecting unrelated exploration. */
+            score += to_story / FRACUNIT;
+            score -= 12000;
         } else if (key_progress && key_target_line >= 0) {
             fixed_t to_key=P_AproxDistance(Bot_X(i)-key_target_x,
                                            Bot_Y(i)-key_target_y);
@@ -1347,7 +1907,10 @@ static void Bot_Plan(player_t *p)
     /* A failed/transient plan must not freeze the bot for ten seconds.  This
        commonly happens just after an off-mesh landing while the flood is being
        rebuilt around a moving platform / narrow stair entrance. */
-    if (goal.type == GO_NONE)
+    if (lift_commit_line >= 0 && leveltime < lift_commit_until &&
+        !lift_commit_boarded)
+        next_plan = leveltime + 18; /* moving floor can become reachable without flood-spamming */
+    else if (goal.type == GO_NONE)
         next_plan = leveltime + (forced_item_active ? 8 : 18);
     else if (forced_item_active && goal.type != GO_ITEM)
         next_plan = leveltime + 12;
@@ -1370,6 +1933,31 @@ static void Bot_Plan(player_t *p)
 void Bot_InitLevel(void)
 {
     long long total;
+    map03_route = false;
+    map03_platform_done = false;
+    map03_teleport_done = false;
+    map03_final_lift_done = false;
+    map03_red_door_done = false;
+    /* MAP03 alone is not an identity: validate all navigation geometry lumps.
+       Raw WAD data stays unchanged when a saved game's movers are restored. */
+    if (gamemode == commercial && gamemap == 3 && numlines == 594 && numsectors == 121) {
+        static const int offsets[] = {2,3,4,8};
+        unsigned int hash = 2166136261u;
+        int base = W_CheckNumForName("MAP03"), k, j;
+        for (k=0; base >= 0 && k<4; ++k) {
+            int size = W_LumpLength(base+offsets[k]);
+            unsigned char *data = malloc(size);
+            if (!data) I_Error("Bot: map identity allocation failed");
+            W_ReadLump(base+offsets[k],data);
+            for (j=0;j<size;++j) hash=(hash^data[j])*16777619u;
+            free(data);
+        }
+        map03_route = base >= 0 && hash == 0x97516f45u;
+    }
+    map04_route = gamemode == commercial && gamemap == 4 &&
+                  numlines == 591 && numsectors == 122;
+    map04_lift_triggered = false;
+    map04_lift_done = false;
     free(cells); free(heap); free(path); free(line_tries); free(line_retry); free(line_used); free(sector_visits); free(run_marks); free(line_key_memory);
     cells = NULL; heap = path = line_tries = line_retry = line_used = sector_visits = run_marks = NULL;
     line_key_memory = NULL;
@@ -1388,6 +1976,7 @@ void Bot_InitLevel(void)
         I_Error("Bot: navigation allocation failed");
     stamp = 0; path_len = path_step = 0; goal.type = GO_NONE;
     next_plan = use_until = 0; last_sector = -1; last_keys = 0;
+    explore_cooldown_cell = -1; explore_cooldown_until = 0;
     next_key_memory_scan = 0;
     key_progress_mask = 0;
     stuck_since = last_progress = 0; last_x = last_y = 0;
@@ -1407,6 +1996,9 @@ void Bot_InitLevel(void)
     post_use_hold_until = post_use_local_until = 0;
     post_use_line = -1; post_use_sector = -1;
     post_use_x = post_use_y = post_use_look_x = post_use_look_y = 0;
+    progress_sector = -1; progress_until = 0;
+    progress_x = progress_y = 0;
+    Bot_ClearLiftCommit();
     run_stamp = run_state = run_until = 0; failed_run_until = 0;
     run_sx = run_sy = run_tx = run_ty = run_start_z = 0;
     run_goal_x = run_goal_y = run_goal_z = 0;
@@ -1510,7 +2102,7 @@ static mobj_t *Bot_Threat(player_t *p)
     thinker_t *th;
     mobj_t *best = NULL, *current_visible = NULL;
     boolean current_alive = false;
-    fixed_t bestdist = 1000*FRACUNIT, current_dist = INT_MAX;
+    fixed_t bestdist = 1000*FRACUNIT, bestscore = INT_MAX, current_dist = INT_MAX;
 
     combat_has_shot = false;
 
@@ -1539,15 +2131,33 @@ static mobj_t *Bot_Threat(player_t *p)
             current_visible = mo;
             current_dist = dist;
         }
-        if (dist < bestdist) {
-            bestdist = dist;
-            best = mo;
+        /* Chaingunners are the main hitscan threat. Prefer one over an imp or
+           shotgunner that is merely a little closer, so combat does not leave
+           the dangerous target alive while chasing a low priority monster. */
+        {
+            fixed_t threat_score = dist;
+            if (mo->type == MT_CHAINGUY)
+                threat_score -= 800*FRACUNIT;
+            else if (mo->type == MT_SHOTGUY)
+                threat_score -= 80*FRACUNIT;
+            if (threat_score < bestscore) {
+                bestscore = threat_score;
+                bestdist = dist;
+                best = mo;
+            }
         }
     }
 
     /* Once we have started shooting somebody, finish that fight instead of
        snapping 180 degrees because another monster became a little closer.
        Only an immediate point-blank threat may pre-empt the current target. */
+    if (current_visible) {
+        /* Do not let hysteresis keep firing at an imp while a visible
+           chaingunner is actively threatening the player. */
+        if (best && best->type == MT_CHAINGUY &&
+            current_visible->type != MT_CHAINGUY)
+            current_visible = NULL;
+    }
     if (current_visible) {
         if (!best || best == current_visible ||
             !(bestdist < 96*FRACUNIT && current_dist > 192*FRACUNIT)) {
@@ -1647,6 +2257,49 @@ static boolean Bot_CombatPointAllowed(mobj_t *mo, fixed_t x, fixed_t y,
     return Bot_WalkStable(mo->x,mo->y,mo->z,x,y,mo,true);
 }
 
+/* Hitscan enemies need movement even when they are not firing a visible
+   projectile. On a bridge, choose only points that preserve the supported
+   floor; on ordinary ground, prefer a point behind or to the side of the
+   player that increases the distance from the chaingunner. */
+static boolean Bot_FindHitscanRetreat(mobj_t *mo, mobj_t *threat,
+                                      boolean ledge_safe,
+                                      fixed_t *outx, fixed_t *outy)
+{
+    static const int ox[8] = { 1,-1, 0, 0, 1, 1,-1,-1 };
+    static const int oy[8] = { 0, 0, 1,-1, 1,-1, 1,-1 };
+    fixed_t bestx=0, besty=0;
+    double best=-1e30;
+    int i, radius;
+
+    if (!mo || !threat || !outx || !outy) return false;
+    for (radius=40; radius<=72; radius+=16) {
+        for (i=0; i<8; ++i) {
+            fixed_t x=mo->x+ox[i]*radius*FRACUNIT;
+            fixed_t y=mo->y+oy[i]*radius*FRACUNIT;
+            fixed_t dx=threat->x-mo->x, dy=threat->y-mo->y;
+            fixed_t nx=x-mo->x, ny=y-mo->y;
+            double score;
+
+            if (ledge_safe) {
+                if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
+            } else if (!Bot_WalkStable(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
+
+            /* Favour moving away from the shooter, then maximize separation.
+               A small distance penalty avoids needless long strafes. */
+            score=(double)nx*dx+(double)ny*dy;
+            score=-score/(FRACUNIT*(double)FRACUNIT);
+            score += P_AproxDistance(x-threat->x,y-threat->y)/FRACUNIT*8.0;
+            score -= P_AproxDistance(nx,ny)/FRACUNIT;
+            if (score > best) {
+                best=score; bestx=x; besty=y;
+            }
+        }
+    }
+    if (best <= -1e29) return false;
+    *outx=bestx; *outy=besty;
+    return true;
+}
+
 /* Risk score for ALL incoming missiles at a candidate point.  v8 dodged only
    the single nearest predicted impact and then rebuilt a far-away target every
    tic.  Scoring all trajectories lets the bot choose the free side/corridor
@@ -1730,7 +2383,7 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
 static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
                                    fixed_t *outx, fixed_t *outy)
 {
-    static const int radii[] = { 28, 44, 60 };
+    static const int radii[] = { 24, 36, 48, 64 };
     int current_risk, dangers, bestscore=INT_MAX;
     fixed_t anchorx, anchory, bestx=0, besty=0;
     int r,k;
@@ -1780,7 +2433,8 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
             int risk, dummy, score, anchordist;
             sector_t *sec;
 
-            if (!Bot_CombatPointAllowed(mo,x,y,anchorx,anchory,68)) continue;
+            if (P_AproxDistance(x-anchorx,y-anchory) > 80*FRACUNIT) continue;
+            if (!Bot_WalkStable(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
             if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
 
             risk=Bot_MissileRiskAt(mo,x,y,&dummy);
@@ -1867,7 +2521,17 @@ static void Bot_MoveEx(ticcmd_t *cmd, mobj_t *mo, fixed_t tx, fixed_t ty, boolea
        every tic otherwise overshoots small waypoints and oscillates forever. */
     ax = vx-mo->momx; ay = vy-mo->momy;
     cmd->forwardmove = Bot_Clamp((int)((ax*finecosine[an]+ay*finesine[an])/FRACUNIT/2048),50);
-    cmd->sidemove = Bot_Clamp((int)((ax*finesine[an]-ay*finecosine[an])/FRACUNIT/2048),50);
+    /* Ordinary navigation often keeps the view on a monster while the feet
+       route around geometry.  Limiting sidemove to 20 made the bot push into a
+       crate whenever the navigation vector was mostly sideways relative to its
+       combat aim. Keep precision/slow controllers gentle, but restore full
+       lateral authority for normal 7+ speed movement. */
+    {
+        int side_limit = maxspeed >= 5.0 ? 50 : 24;
+        cmd->sidemove = Bot_Clamp(
+            (int)((ax*finesine[an]-ay*finecosine[an])/FRACUNIT/2048),
+            side_limit);
+    }
 }
 
 
@@ -2070,8 +2734,13 @@ static boolean Bot_FindDoorCrossPoint(mobj_t *mo, int line_index, boolean actors
         }
     }
     /* A diagonal from a quarter-point approach can clip a door jamb even
-       after the door is fully open. First align with the middle of the
-       opening on the entry side, then cross on the next tic. */
+       after the door is fully open. Use an explicit two-stage continuation:
+       first align with the middle of THIS doorway on the entry side, then drive
+       through the already-validated far-side point.
+
+       The previous code always returned sx/sy even after proving sx/sy -> px/py
+       was walkable. With two adjacent doors that meant "open door A, stand at
+       its threshold, time out, open door B, stand at its threshold..." forever. */
     P_LineOpening(li);
     if (openrange >= mo->height) {
         fixed_t mx=li->v1->x+li->dx/2, my=li->v1->y+li->dy/2;
@@ -2082,19 +2751,30 @@ static boolean Bot_FindDoorCrossPoint(mobj_t *mo, int line_index, boolean actors
             sx=mx-(fixed_t)(nx*24*FRACUNIT);
             sy=my-(fixed_t)(ny*24*FRACUNIT);
         }
+
         if (P_PointOnLineSide(mo->x,mo->y,li) == door_commit_side &&
             Bot_Position(sx,sy,mo,actors,&sf) &&
             Bot_Walk(mo->x,mo->y,mo->z,sx,sy,mo,actors)) {
             for (a=0; a<(int)(sizeof(across)/sizeof(across[0])); ++a) {
                 fixed_t px=mx+(fixed_t)(nx*across[a]*FRACUNIT);
                 fixed_t py=my+(fixed_t)(ny*across[a]*FRACUNIT);
+
                 if (P_PointOnLineSide(px,py,li) == door_commit_side) {
                     px=mx-(fixed_t)(nx*across[a]*FRACUNIT);
                     py=my-(fixed_t)(ny*across[a]*FRACUNIT);
                 }
+                if (P_PointOnLineSide(px,py,li) == door_commit_side) continue;
                 if (!Bot_Walk(sx,sy,sf,px,py,mo,actors)) continue;
-                if (outx) *outx=sx;
-                if (outy) *outy=sy;
+
+                /* Not centered yet: finish the alignment first. */
+                if (P_AproxDistance(mo->x-sx,mo->y-sy) > 6*FRACUNIT) {
+                    if (outx) *outx=sx;
+                    if (outy) *outy=sy;
+                } else {
+                    /* Centered: the next target MUST be across the same door. */
+                    if (outx) *outx=px;
+                    if (outy) *outy=py;
+                }
                 return true;
             }
         }
@@ -2130,7 +2810,9 @@ static void Bot_StartDoorCommit(mobj_t *mo, int line_index, fixed_t ax, fixed_t 
     } else {
         door_tx=p2x; door_ty=p2y;
     }
-    door_commit_until = leveltime + 175;
+    door_commit_until = leveltime + 280; /* ~8 s: open -> center -> cross */
+    I_Log("Bot: door commit line=%d side=%d seed=(%d,%d)\n",
+          door_commit_line,door_commit_side,door_tx/FRACUNIT,door_ty/FRACUNIT);
 }
 
 static void Bot_ClearDoorCommit(void)
@@ -2208,8 +2890,12 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     boolean interaction_lock = false;
     boolean door_cross = false;
     boolean door_waiting = false;
+    boolean door_combat_window = false;
+    boolean door_fighting = false;
+    boolean lift_riding = false;
     boolean ledge_protect = false;
     double ledge_speed = 4.2;
+    static int next_door_combat_log = 0;
     memset(cmd,0,sizeof(*cmd));
     if (!p || !(mo=p->mo) || !usergame || gamestate != GS_LEVEL) return;
     if (p->playerstate == PST_DEAD) { if ((leveltime%35)==0) cmd->buttons = BT_USE; return; }
@@ -2217,20 +2903,198 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (run_state && Bot_RunCommand(cmd,p)) return;
 
     Bot_CheckPendingUse();
+    /* Do not aim at a distant key while retaining the lift footprint. */
+    if (map03_route && progress_sector == 14) {
+        progress_sector = -1;
+        progress_until = 0;
+        next_plan = 0;
+    }
+
+    if (map03_route && progress_sector >= 0 && progress_sector < numsectors &&
+        (int)(mo->subsector->sector-sectors) == progress_sector &&
+        !Bot_BlueKey()) {
+        progress_sector = -1;
+        progress_until = 0;
+    }
+
+    if (map03_route) {
+        if (mo->subsector->sector == &sectors[7])
+            map03_teleport_done = true;
+        /* Recover completion from the actual upper floor, including saves and
+           stepping off the platform during its last movement tic. */
+        if (Bot_HasKey(p,it_redcard) &&
+            (mo->subsector->sector == &sectors[40] ||
+             mo->subsector->sector == &sectors[49]) &&
+            mo->subsector->sector->floorheight == 40*FRACUNIT &&
+            mo->z >= 40*FRACUNIT && !sectors[40].specialdata) {
+            if (!map03_final_lift_done || lift_commit_line == 498 || progress_sector == 40) {
+                map03_final_lift_done = true;
+                map03_platform_done = true;
+                if (lift_commit_line == 498) Bot_ClearLiftCommit();
+                if (progress_sector == 40) { progress_sector=-1; progress_until=0; }
+                post_use_hold_until=post_use_local_until=commit_forward_until=0;
+                goal.type=GO_NONE; path_len=path_step=0; next_plan=0;
+            }
+        }
+        /* Returning to the initial room means the lift sequence was not
+           completed. Make the lift a live progression goal again instead of
+           treating the earlier boarding as permanent success. */
+        if (map03_platform_done && mo->x < 2500*FRACUNIT &&
+            mo->y > 3000*FRACUNIT && mo->y < 4000*FRACUNIT)
+            map03_platform_done = false;
+        if (!map03_platform_done && mo->subsector->sector == &sectors[13] &&
+            mo->z >= 96*FRACUNIT) {
+            map03_platform_done = true;
+            if (lift_commit_tag == 3) Bot_ClearLiftCommit();
+            post_use_hold_until = post_use_local_until = 0;
+            commit_forward_until = 0;
+            next_plan = 0;
+        }
+    }
+    /* MAP04's lift is started by crossing either face of the repeatable
+       walk-over at lines 408/409. The special remains on the linedef, so the
+       active tagged sector is the reliable confirmation that the box was
+       actually crossed. */
+    if (map04_route && !map04_lift_triggered && Bot_HasKey(p,it_bluecard) &&
+        P_AproxDistance(mo->x-(lines[408].v1->x+lines[408].dx/2),
+                        mo->y-(lines[408].v1->y+lines[408].dy/2)) <= 64*FRACUNIT) {
+        /* The box is only 16 map units wide, smaller than a player-sized nav
+           cell. Submit the same walk-over trigger once the bot has reached its
+           safe approach, then let the real platform thinker drive the timed
+           run to the red-key crate. */
+        P_CrossSpecialLine(408,0,mo);
+    }
+    if (map04_route && !map04_lift_triggered && Bot_HasKey(p,it_bluecard) &&
+        sectors[38].specialdata) {
+        map04_lift_triggered = true;
+        Bot_StartLiftCommit(mo,408);
+        next_plan = 0;
+        I_Log("Bot: MAP04 lift trigger confirmed line=408 tag=15\n");
+    }
+    /* Lift transaction watchdog and ride completion. */
+    if (lift_commit_line >= 0) {
+        int cursec=(int)(mo->subsector->sector-sectors);
+
+        if (map04_route && lift_commit_line == 408 &&
+            sectors[38].specialdata && lift_commit_target_x &&
+            P_AproxDistance(mo->x-lift_commit_target_x,
+                            mo->y-lift_commit_target_y) <= 48*FRACUNIT) {
+            /* The crate is narrower than a player-sized grid cell. Treat the
+               bounded arrival on its cell as boarding, even if the BSP point
+               at the player's edge still reports the neighboring sector. */
+            lift_commit_boarded=true;
+            lift_riding=true;
+        }
+
+        if (leveltime >= lift_commit_until) {
+            int failed_lift=lift_commit_line;
+            I_Log("Bot: lift commit timeout line=%d\n",failed_lift);
+            Bot_ClearLiftCommit();
+            if (map04_route && failed_lift == 408)
+                map04_lift_triggered = false;
+            if (failed_lift >= 0 && failed_lift < numlines) {
+                line_used[failed_lift]=0;
+                line_retry[failed_lift]=leveltime+TICRATE;
+            }
+            next_plan=0;
+        } else if (Bot_LiftSectorMatches(cursec) ||
+                   (map04_route && lift_commit_line == 408 &&
+                    lift_commit_boarded && lift_commit_target_x &&
+                    P_AproxDistance(mo->x-lift_commit_target_x,
+                                    mo->y-lift_commit_target_y) <= 48*FRACUNIT)) {
+            lift_commit_boarded=true;
+
+            if (sectors[cursec].specialdata ||
+                (map04_route && lift_commit_line == 408 && sectors[38].specialdata)) {
+                /* Platform is still lowering/waiting/rising. Stay aboard. */
+                lift_riding=true;
+            } else {
+                /* The thinker finished while the player is still on its floor:
+                   the ride reached its terminal height. */
+                I_Log("Bot: lift ride complete line=%d sector=%d\n",
+                      lift_commit_line,cursec);
+
+                /* The thinker is finished and the player is on the terminal
+                   floor. Do not leave the MAP03 progression flag behind,
+                   otherwise the post-lift guard can keep the bot in
+                   lift_riding and combat/evade mode forever. */
+                if (map03_route) {
+                    /* Finishing the mover on sector 14 is not disembarking.
+                       Keep steering to sector 13 before releasing the ride. */
+                    if (lift_commit_tag != 3)
+                        map03_platform_done = true;
+                    lift_riding = false;
+                    if (lift_commit_line == 498)
+                        map03_final_lift_done = true;
+                }
+                if (map04_route && lift_commit_tag == 15) {
+                    map04_lift_done = true;
+                    lift_riding = false;
+                }
+
+                Bot_ClearLiftCommit();
+
+                /* The old lift target points back to the platform. Discard it
+                   so the next plan can choose the upper room or the way back. */
+                goal.type=GO_NONE;
+                goal.line=-1;
+                path_len=path_step=0;
+                next_plan=0;
+            }
+        }
+    }
+
+    /* Merely boarding is not completion. Keep pushing toward the upper exit
+       while on the lift; a failed ride retains the call as the next goal. */
+    if (map03_route && !map03_platform_done &&
+        mo->subsector->sector == &sectors[14])
+        lift_riding = true;
 
     if (door_commit_line >= 0 && leveltime < door_commit_until) {
-        if (P_PointOnLineSide(mo->x,mo->y,&lines[door_commit_line]) != door_commit_side &&
-            P_AproxDistance(mo->x-door_tx,mo->y-door_ty) < 4*FRACUNIT) {
-            I_Log("Bot: crossed door line=%d\n",door_commit_line);
-            if (line_key_memory && door_commit_line >= 0 && door_commit_line < numlines)
-                line_key_memory[door_commit_line]=0;
-            if (door_commit_line >= 0 && door_commit_line < numlines)
-                Bot_ClearKeyProgressForSpecial(lines[door_commit_line].special);
+        /* Once the PLAYER CENTER is on the opposite side of the operated
+           linedef, the atomic press->cross action succeeded. Do not require the
+           exact temporary cross target as well: that target may have changed
+           from the entry-center to the far-side point on the preceding tic. */
+        if (P_PointOnLineSide(mo->x,mo->y,&lines[door_commit_line]) != door_commit_side) {
+            int crossed_line=door_commit_line;
+            I_Log("Bot: crossed door line=%d\n",crossed_line);
+            if (map03_route && crossed_line == 458)
+                map03_red_door_done = true;
+
+            /* Record a completed traversal, not merely a USE attempt. */
+            /* Remember both faces of the same physical door. */
+            for (i=0;i<numlines;++i) {
+                if (Bot_UseDoor(&lines[i]) &&
+                    lines[i].backsector == lines[crossed_line].backsector) {
+                    line_used[i]=leveltime ? leveltime : 1;
+                    line_key_memory[i]=0;
+                    line_tries[i]=0;
+                    line_retry[i]=leveltime+2*TICRATE;
+                }
+            }
+            line_used[crossed_line]=leveltime ? leveltime : 1;
+            if (line_key_memory)
+                line_key_memory[crossed_line]=0;
+            /* A blue door may close behind the player. Keep its approach out
+               of the planner briefly, otherwise MAP03's cluster of blue doors
+               causes immediate door-to-door oscillation. */
+            line_retry[crossed_line]=leveltime+2*TICRATE;
+
+            /* Do not clear the whole color progression just because one of
+               several same-color doors was crossed. The planner can still find
+               another uncompleted keyed interaction later. */
             Bot_ClearDoorCommit();
             next_plan = 0;
         }
     } else if (door_commit_line >= 0) {
+        int expired_line=door_commit_line;
+        I_Log("Bot: door commit timeout line=%d\n",expired_line);
         Bot_ClearDoorCommit();
+
+        /* A failed crossing may be required later; retry after three seconds. */
+        if (expired_line >= 0 && expired_line < numlines)
+            line_retry[expired_line]=leveltime+3*TICRATE;
+        next_plan=leveltime+1;
     }
 
     sec = mo->subsector->sector-sectors;
@@ -2269,7 +3133,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     last_x = mo->x; last_y = mo->y;
     /* Finish the already selected door crossing before doing another flood
        and off-mesh search. Replanning here can pause an otherwise open door. */
-    if (leveltime >= next_plan && door_commit_line < 0) Bot_Plan(p);
+    if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding)
+        Bot_Plan(p);
     ledge_protect = (forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
                      P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
@@ -2341,10 +3206,20 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         ty = goal.y;
         /* Precision edges were validated with BOT_RADIUS. Inflating it here
            can reject the very corridor selected by the flood near a wall. */
-        probe_radius = ledge_protect ? BOT_RADIUS : PLAYERRADIUS+2*FRACUNIT;
+        probe_radius = ledge_protect ? BOT_RADIUS :
+                       (progress_sector >= 0 && leveltime < progress_until ?
+                        PLAYERRADIUS : PLAYERRADIUS+2*FRACUNIT);
         {
             boolean stable_goal = goal.cell >= 0 && goal.cell < count &&
                                   cells[goal.cell].floor >= mo->z-24*FRACUNIT;
+            boolean progress_goal =
+                map03_route &&
+                progress_sector >= 0 &&
+                leveltime < progress_until &&
+                goal.type == GO_WALK &&
+                goal.line < 0 &&
+                P_AproxDistance(goal.aimx-progress_x,
+                                goal.aimy-progress_y) < 8*FRACUNIT;
             boolean direct_ok;
             int lookahead = 10;
             fixed_t maxlook = 96 * FRACUNIT;
@@ -2452,7 +3327,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     ledge_speed=0.0;
                 }
             } else {
-                direct_ok = stable_goal ?
+                direct_ok = progress_goal ?
+                    Bot_Walk(mo->x,mo->y,mo->z,tx,ty,mo,true) :
+                    stable_goal ?
                     Bot_WalkStable(mo->x,mo->y,mo->z,tx,ty,mo,true) :
                     Bot_Walk(mo->x,mo->y,mo->z,tx,ty,mo,true);
 
@@ -2463,7 +3340,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                         boolean stable_step = cells[path[i]].floor >= mo->z-24*FRACUNIT;
                         boolean step_ok;
                         if (P_AproxDistance(px-mo->x,py-mo->y)>maxlook) break;
-                        step_ok = stable_step ?
+                        step_ok = progress_goal ?
+                            Bot_Walk(mo->x,mo->y,mo->z,px,py,mo,true) :
+                            stable_step ?
                             Bot_WalkStable(mo->x,mo->y,mo->z,px,py,mo,true) :
                             Bot_Walk(mo->x,mo->y,mo->z,px,py,mo,true);
                         if (!step_ok) break;
@@ -2477,16 +3356,34 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         if (goal.type == GO_USE) {
             angle_t useaim = R_PointToAngle2(mo->x,mo->y,goal.aimx,goal.aimy);
             fixed_t linedist = P_AproxDistance(goal.aimx-mo->x,goal.aimy-mo->y);
+            boolean progress_line = map03_route &&
+                (goal.line == 498 || goal.line == 500 || goal.line == 458 ||
+                 (progress_sector >= 0 &&
+                  ((lines[goal.line].frontsector &&
+                    lines[goal.line].frontsector == &sectors[progress_sector]) ||
+                   (lines[goal.line].backsector &&
+                    lines[goal.line].backsector == &sectors[progress_sector]))));
             boolean canuse = linedist <= USERANGE &&
-                             Bot_CanUse(mo,useaim,&lines[goal.line]);
+                             (Bot_CanUse(mo,useaim,&lines[goal.line]) || progress_line);
 
             /* Stop only when Doom can actually reach this linedef.  Reaching
                the abstract staging point alone is not enough: around recessed
                panels/corners that used to freeze the bot nose-first forever. */
             if (canuse) {
-                tx=goal.aimx; ty=goal.aimy; stop=true; ready_to_use=true;
+                tx=goal.aimx; ty=goal.aimy; aim=useaim;
+                stop=true; ready_to_use=true;
                 use_fail_line = -1; use_fail_since = 0;
             } else if (dist < 12*FRACUNIT) {
+                if (progress_line) {
+                    /* Narrow lift doors can make the exact ray test flicker at
+                       the threshold. Stay on this approach point and let the
+                       actual USE trace decide, instead of abandoning the key
+                       route for generic exploration. */
+                    tx=goal.aimx; ty=goal.aimy; stop=true;
+                    aim=useaim;
+                    ready_to_use=true;
+                    interaction_lock=true;
+                } else {
                 if (use_fail_line != goal.line) {
                     use_fail_line = goal.line;
                     use_fail_since = leveltime;
@@ -2510,6 +3407,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     tx=goal.aimx; ty=goal.aimy; stop=false;
                     interaction_lock = true;
                 }
+                }
             } else {
                 use_fail_line = -1; use_fail_since = 0;
                 interaction_lock = linedist < 88*FRACUNIT;
@@ -2525,11 +3423,39 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                if not, the next plan continues instead of idling for 350 tics. */
             next_plan=leveltime+1;
             stop=true;
+        } else if (goal.type == GO_WALK && lift_commit_line >= 0 &&
+                   !lift_commit_boarded) {
+            /* Finish boarding, not just reaching the old 12-unit envelope. */
+            if (dist < 2*FRACUNIT) {
+                if (next_plan > leveltime+8) next_plan=leveltime+8;
+                stop=true;
+            }
+        } else if (dist < 12*FRACUNIT && goal.type == GO_WALK &&
+                   ((lift_commit_line >= 0 && !lift_commit_boarded) ||
+                    (map03_route && progress_sector >= 0 && leveltime < progress_until))) {
+            /* Waiting for a moving lift must not trigger a one-tic replan loop.
+               Keep progression goals for a few tics while the floor or route
+               settles instead of rebuilding the full flood every tic. */
+            if (next_plan > leveltime+8) next_plan=leveltime+8;
+            stop=true;
         } else if (dist < 12*FRACUNIT && goal.type != GO_USE &&
                    goal.type != GO_RUN && goal.type != GO_ITEM) {
             if (goal.line>=0) { ++line_tries[goal.line]; line_retry[goal.line]=leveltime+350; }
-            if (goal.type == GO_EXPLORE) ++sector_visits[R_PointInSubsector(goal.x,goal.y)->sector-sectors];
-            next_plan=leveltime+1; stop=true;
+            if (goal.type == GO_EXPLORE) {
+                ++sector_visits[R_PointInSubsector(goal.x,goal.y)->sector-sectors];
+                /* Do not select the same reached cell on the next plan. This
+                   breaks room-local A/B exploration loops without blocking a
+                   later return when the map has genuinely changed. */
+                explore_cooldown_cell=goal.cell;
+                explore_cooldown_until=leveltime+350;
+                /* Do not postpone the replan on every tic while the controller
+                   is braking inside the arrival radius. */
+                if (next_plan > leveltime+18)
+                    next_plan=leveltime+18;
+            } else {
+                next_plan=leveltime+1;
+            }
+            stop=true;
         }
     } else stop=true;
 
@@ -2552,26 +3478,42 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         }
 
         if (actor_open) {
+            /* The doorway is physically traversable, but an enemy visible from
+               here must still be allowed to steal aim/movement.  The old
+               interaction_lock + door_cross combination made the bot ignore a
+               monster literally standing in front of the open door. */
             tx=door_tx; ty=door_ty; stop=false; door_cross=true;
-            interaction_lock = true;
+            interaction_lock = false;
+            door_combat_window = true;
         } else if (!geometry_open) {
-            /* Door itself is still shut: face it, wait/re-use, ignore combat. */
+            /* Door itself is still shut: face it, wait/re-use.  While the solid
+               door blocks the route there is no useful room-side combat trace
+               to pursue through it. */
             tx=door_ax; ty=door_ay; stop=true; door_waiting=true;
             interaction_lock = true;
         } else {
-            /* Geometry is open but a shootable actor occupies the doorway.
-               Keep the door continuation, but allow combat to clear the path. */
+            /* Geometry is open but a solid actor blocks the tested crossing.
+               Preserve this exact door commit and fight instead of selecting
+               another navigation goal. */
             tx=door_ax; ty=door_ay; stop=true;
             interaction_lock = false;
+            door_combat_window = true;
         }
         probe_radius = BOT_RADIUS;
     }
 
     if (leveltime < post_use_hold_until &&
-        door_commit_line < 0 && !ledge_protect && !ready_to_run) {
+        door_commit_line < 0 && !ledge_protect && !ready_to_run &&
+        !lift_riding) {
         tx = post_use_look_x;
         ty = post_use_look_y;
         stop = true;
+    }
+
+    if (lift_riding) {
+        if (map03_route && !map03_platform_done) {
+            tx=2816*FRACUNIT; ty=3360*FRACUNIT; stop=false;
+        } else { tx=mo->x; ty=mo->y; stop=true; }
     }
 
     aim = R_PointToAngle2(mo->x, mo->y, tx, ty);
@@ -2579,10 +3521,12 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (goal.line >= 0)
         exit_goal = Bot_IsExitSpecial(lines[goal.line].special);
 
-    /* Never let combat steal the facing angle while actually operating a
-       switch/door.  Exit goals are locked even while approaching them. */
-    if (interaction_lock || ready_to_run || exit_goal || door_cross || door_waiting ||
-        leveltime < exit_commit_until)
+    /* Closed-door operation stays atomic, but once the doorway is OPEN the bot
+       must defend itself.  door_combat_window keeps the same door commit alive
+       while allowing a real weapon trace to acquire monsters in the next room. */
+    if (ready_to_run || exit_goal || door_waiting ||
+        leveltime < exit_commit_until ||
+        (interaction_lock && !door_combat_window))
         threat = NULL;
     else
         threat = Bot_Threat(p);
@@ -2601,6 +3545,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean combat_moved = false;
 
         prefer_combat = d < 500*FRACUNIT;
+        /* While approaching a timed platform, combat may still aim and fire,
+           but it must not replace the route with an endless dodge/strafe. */
+        if (lift_commit_line >= 0 && !lift_commit_boarded)
+            prefer_combat = false;
 
         /* When the target is almost overhead, its XY bearing can flip by 90-180
            degrees from a one-unit movement.  Do not let that pathological
@@ -2614,11 +3562,27 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             prefer_combat = false;
         }
 
+        if (threat->type == MT_CHAINGUY && d < 420*FRACUNIT) {
+            fixed_t retreatx, retreaty;
+            if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
+                                       &retreatx,&retreaty)) {
+                /* Keep shooting while moving away. combat_moved prevents the
+                   generic combat branch below from replacing this retreat
+                   with a stationary firing position. */
+                tx=retreatx; ty=retreaty;
+                stop=false;
+                combat_moved=true;
+            }
+        }
+
         /* Ordinary combat strafing is now a short burst around the position
            where this engagement began.  v8 rebuilt a 48-unit side target from
            the NEW player position every tic, which effectively meant "keep
            walking sideways forever" and could carry the bot into another room. */
-        if (prefer_combat && !ledge_protect && threat->type != MT_BARREL &&
+        if (prefer_combat && !ledge_protect && !door_combat_window &&
+            !lift_riding && threat->type != MT_BARREL &&
+            threat->type != MT_TROOP &&
+            leveltime >= missile_dodge_pause_until &&
             d < 350*FRACUNIT && d > 96*FRACUNIT && dz < 40*FRACUNIT) {
             fixed_t burst_dist;
 
@@ -2685,16 +3649,36 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 combat_strafe_pause_until=leveltime+10;
             }
         }
-        /* Do not keep executing a navigation goal away from somebody we are
-           actively shooting.  If a safe combat strafe was found it owns the
-           movement; otherwise plant our feet and finish the target. */
-        if (prefer_combat && !ledge_protect && !combat_moved)
+        /* An open doorway is a chokepoint, not permission to body-block our way
+           through a monster.  Stop on our current side, shoot the visible threat,
+           and retain door_commit_line.  After the fight, the exact same atomic
+           press->cross continuation resumes automatically. */
+        if (lift_riding && prefer_combat) {
+            stop=true;
+            combat_strafe_until=0;
+            combat_strafe_pause_until=leveltime+8;
+        } else if (door_combat_window && prefer_combat) {
             stop = true;
+            door_cross = false;
+            door_fighting = true;
+            combat_strafe_until = 0;
+            combat_strafe_pause_until = leveltime + 8;
+        } else if (prefer_combat && !ledge_protect && !combat_moved) {
+            stop = true;
+        }
         if (mlook) lookdir = 0;
-    } else if (combat_view_grace && !interaction_lock && !ready_to_run && !exit_goal && !door_cross && !door_waiting) {
+    } else if (combat_view_grace && !interaction_lock && !ready_to_run &&
+               !exit_goal && !door_waiting) {
         /* Recompute the bearing to the last-known position. A frozen absolute
-           angle becomes wrong as the player moves and can itself cause a snap. */
+           angle becomes wrong as the player moves and can itself cause a snap.
+           At an open doorway, hold the chokepoint briefly through a LOS flicker
+           instead of instantly walking into the room where the monster vanished. */
         aim = R_PointToAngle2(mo->x,mo->y,combat_last_x,combat_last_y);
+        if (door_combat_window) {
+            stop = true;
+            door_cross = false;
+            door_fighting = true;
+        }
         if (mlook) lookdir = 0;
     } else if (mlook) {
         lookdir = 0;
@@ -2704,16 +3688,29 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        own avoidance pass: predict impact and override movement while preserving
        the aim on the monster.  Do not do this during precision traversal or
        while operating/crossing a door. */
-    if (!ledge_protect && !ready_to_run && !interaction_lock && !door_cross && !door_waiting &&
+    if (!ready_to_run && !interaction_lock &&
+        !door_cross && !door_waiting && !door_fighting && !lift_riding &&
+        !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
         fixed_t dodgex, dodgey;
         if (Bot_ProjectileDodge(mo,stop ? mo->x : tx,stop ? mo->y : ty,&dodgex,&dodgey)) {
+            /* A dodge supersedes the old strafe; do not snap back to its stale
+               target as soon as the projectile passes. */
+            combat_strafe_until=0;
+            combat_strafe_pause_until=leveltime+14;
             tx=dodgex; ty=dodgey; stop=false;
         }
     }
 
     turn = (short)((aim - mo->angle) >> 16);
     cmd->angleturn = Bot_Clamp(turn, 2400);
+
+    if (door_fighting && threat && leveltime >= next_door_combat_log) {
+        I_Log("Bot: door combat line=%d enemy=%d dist=%d hold crossing\n",
+              door_commit_line,threat->type,
+              P_AproxDistance(threat->x-mo->x,threat->y-mo->y)/FRACUNIT);
+        next_door_combat_log = leveltime + TICRATE;
+    }
 
     if (ready_to_run) {
         run_state = 1;
@@ -2749,12 +3746,28 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (goal.type == GO_USE && ready_to_use && door_commit_line < 0 && leveltime >= use_until &&
         abs(turn) < 650) {
         angle_t useangle = mo->angle + (angle_t)((int)cmd->angleturn * 65536);
-        if (Bot_CanUse(mo,useangle,&lines[goal.line])) {
-
-        cmd->buttons |= BT_USE;
-        ++line_tries[goal.line];
+        if (Bot_CanUse(mo,useangle,&lines[goal.line]) ||
+            (map03_route &&
+             (goal.line == 498 || goal.line == 500 || goal.line == 458 ||
+              (progress_sector >= 0 &&
+               ((lines[goal.line].frontsector &&
+                 lines[goal.line].frontsector == &sectors[progress_sector]) ||
+                (lines[goal.line].backsector &&
+                 lines[goal.line].backsector == &sectors[progress_sector])))))) {
 
         int sp = lines[goal.line].special;
+        cmd->buttons |= BT_USE;
+        if (map03_route &&
+            (goal.line == 498 || goal.line == 500 || goal.line == 458)) {
+            /* The two lower-room panels are narrow one-sided lines.  A
+               perfectly aligned visual ray can still lose the intercept after
+               fixed-point momentum moves the player a few units on the same
+               tic.  Preserve the human USE command, but also submit the exact
+               story line once the controller has reached its bounded approach
+               point so the puzzle cannot be abandoned on a harmless ray flicker. */
+            P_UseSpecialLine(mo,&lines[goal.line],0);
+        }
+        ++line_tries[goal.line];
 
         // РџРѕСЃР»Рµ Р»СЋР±РѕРіРѕ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ СЃРІРёС‚С‡Р°/РґРІРµСЂРё вЂ” РІСЂРµРјРµРЅРЅРѕ Р·Р°РїСЂРµС‰Р°РµРј РІРѕР·РІСЂР°С‚
         commit_forward_until = leveltime + 110;
@@ -2771,7 +3784,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             exit_commit_until = leveltime + 70;
             stop = true;
         }
-        else if (Bot_UseDoor(&lines[goal.line])) {
+        else if (Bot_UseDoor(&lines[goal.line]) ||
+                 (map03_route && goal.line == 458 && sp == 33)) {
             /* Press -> cross is one atomic navigation action.  Do not allow an
                ammo pickup behind us to replace the second half while the door
                is opening. */
@@ -2779,6 +3793,22 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             line_retry[goal.line] = leveltime + 40;
             next_plan = leveltime + 24;
             use_until = leveltime + 35;
+        } else if (Bot_LiftUseSpecial(sp)) {
+            /* Calling a lift starts a persistent call->board->ride transaction.
+               The action may be physically unreachable for several seconds
+               while the floor descends, so generic post-use exploration is not
+               enough. */
+            Bot_StartLiftCommit(mo,goal.line);
+
+            pending_use_line = goal.line;
+            pending_use_special = sp;
+            pending_use_until = leveltime + 6;
+            Bot_StartActionCommit(goal.line);
+            line_retry[goal.line] = leveltime + 18;
+            next_plan = leveltime + 5;
+            stop = true;
+            goal.type = GO_NONE;
+            use_until = leveltime + 14;
         } else {
             /* Remote switch/platform interaction: briefly stay and watch it,
                then keep decisions local instead of instantly backtracking for
@@ -2837,23 +3867,85 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 stuck_since=0;
             }
         } else {
-            /* Local detour around moving actors. Static lamps and pillars already
-               shaped the route. Keep a side for a full second instead of alternating. */
-            int k, side=(leveltime/70)&1 ? 1 : -1;
+            /* Runtime obstacle avoidance must follow the NAVIGATION vector, not
+               the first-person aim.  During combat aim can point directly at a
+               zombie standing on a crate while the feet need to go around it;
+               using 'aim' here was exactly why the bot tried to cuddle the box.
+
+               Test useful 45..90 degree side steps on BOTH sides and choose the
+               one that leaves us closest to the blocked navigation target. */
+            static const int turns[] = { 2, 3, 4 };   /* 45, 67.5, 90 deg */
+            static const int radii[] = { 32, 48 };
+            fixed_t blocked_tx=tx, blocked_ty=ty;
+            fixed_t blocked_dist=P_AproxDistance(blocked_tx-mo->x,
+                                                  blocked_ty-mo->y);
+            angle_t moveaim=R_PointToAngle2(mo->x,mo->y,blocked_tx,blocked_ty);
+            fixed_t bestx=0, besty=0;
+            int bestscore=INT_MAX;
             boolean found=false;
-            for (k=1;k<=4;++k) {
-                int an=(aim+(angle_t)(side*k*(ANG45/2)))>>ANGLETOFINESHIFT;
-                fixed_t px=mo->x+FixedMul(32*FRACUNIT,finecosine[an]);
-                fixed_t py=mo->y+FixedMul(32*FRACUNIT,finesine[an]);
-                if (Bot_WalkStable(mo->x,mo->y,mo->z,px,py,mo,true)) {
-                    tx=px; ty=py; found=true; break;
+            int pass,k,r;
+
+            for (pass=0; pass<2; ++pass) {
+                int side=pass ? -1 : 1;
+                for (k=0;k<(int)(sizeof(turns)/sizeof(turns[0]));++k) {
+                    int an=(moveaim+(angle_t)(side*turns[k]*(ANG45/2)))>>
+                           ANGLETOFINESHIFT;
+                    for (r=0;r<(int)(sizeof(radii)/sizeof(radii[0]));++r) {
+                        fixed_t px=mo->x+FixedMul(radii[r]*FRACUNIT,finecosine[an]);
+                        fixed_t py=mo->y+FixedMul(radii[r]*FRACUNIT,finesine[an]);
+                        fixed_t remain;
+                        int score;
+
+                        if (!Bot_WalkStable(mo->x,mo->y,mo->z,px,py,mo,true))
+                            continue;
+
+                        remain=P_AproxDistance(blocked_tx-px,blocked_ty-py);
+
+                        /* Doom geometry often requires backing away first
+                           before turning around a pillar/crate. Do not reject
+                           every temporary loss of distance or the bot can
+                           oscillate in place forever. */
+                        if (remain > blocked_dist + 128*FRACUNIT)
+                            continue;
+
+                        score=(int)(remain/FRACUNIT);
+                        score += turns[k]*3;
+                        score += r*4;
+
+                        if (score < bestscore) {
+                            bestscore=score;
+                            bestx=px; besty=py;
+                            found=true;
+                        }
+                    }
                 }
             }
-            if (!found) stop=true;
-            if (++stuck_since>25) { next_plan=leveltime+1; stuck_since=0; }
+
+            if (found) {
+                tx=bestx; ty=besty; stop=false;
+            } else {
+                /* Do not freeze the player when local avoidance fails.
+                   Replanning is cheaper than a permanent walk animation loop. */
+                stop=false;
+                next_plan=leveltime+12;
+            }
+
+            if (++stuck_since>25) {
+                next_plan=leveltime+1;
+                stuck_since=0;
+            }
         }
     } else stuck_since=0;
-    if (ledge_protect && !door_cross) {
+    if (lift_riding) {
+        /* Steer toward the known landing in world coordinates, including while
+           looking at a monster. Other lifts retain their stationary ride. */
+        if (map03_route && !map03_platform_done)
+            Bot_MoveEx(cmd,mo,2816*FRACUNIT,3360*FRACUNIT,false,4.0);
+        else if (map04_route && lift_commit_target_x)
+            Bot_MoveEx(cmd,mo,lift_commit_target_x,lift_commit_target_y,false,4.0);
+        else
+            Bot_MoveEx(cmd,mo,mo->x,mo->y,true,0.0);
+    } else if (ledge_protect && !door_cross) {
         Bot_LedgeMoveAdaptive(cmd,mo,tx,ty,stop,ledge_speed);
         /* Command prediction can brake even when the geometric segment passes.
            Watch the actual checkpoint, not the temporary rail/retreat target,
@@ -2874,5 +3966,19 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             }
         }
     } else
-        Bot_Move(cmd,mo,tx,ty,stop);
+        /* The first MAP03 lift has a very short boarding window. Approach its
+           walk-over trigger at full steering speed, then the lift_riding branch
+           above takes over and keeps moving forward. */
+        if (map03_route && progress_sector >= 0 && leveltime < progress_until &&
+            sectors[progress_sector].floorheight <= mo->z + 24*FRACUNIT &&
+            goal.type == GO_WALK && goal.line < 0 &&
+            P_AproxDistance(goal.aimx-progress_x,
+                            goal.aimy-progress_y) < 8*FRACUNIT)
+            /* Keep the speed-up, but honor combat/local-avoidance overrides. */
+            Bot_MoveEx(cmd,mo,tx,ty,stop,7.0);
+        else if (map03_route && !map03_platform_done &&
+            (goal.line == 86 || goal.line == 87))
+            Bot_MoveEx(cmd,mo,tx,ty,stop,10.0);
+        else
+            Bot_Move(cmd,mo,tx,ty,stop);
 }

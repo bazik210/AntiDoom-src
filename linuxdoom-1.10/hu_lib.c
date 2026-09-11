@@ -186,6 +186,8 @@ HUlib_initSText
 
     int i;
 
+    if (h < 1) h = 1;
+    if (h > HU_MAXLINES) h = HU_MAXLINES;
     s->h = h;
     s->on = on;
     s->laston = true;

@@ -173,6 +173,13 @@ void D_ProcessEvents (void)
     for ( ; eventtail != eventhead ; eventtail = (++eventtail)&(MAXEVENTS-1) )
     {
 	ev = &events[eventtail];
+	/* Console input takes precedence over menu hotkeys, including Escape. */
+	if (gamestate == GS_LEVEL &&
+	    (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE)))
+	{
+	    G_Responder(ev);
+	    continue;
+	}
 	if (M_Responder (ev))
 	    continue;               // menu ate the event
 	G_Responder (ev);

@@ -57,6 +57,8 @@ void HU_Drawer(void);
 char HU_dequeueChatChar(void);
 void HU_Erase(void);
 
+extern boolean console_on;
+
 
 #endif
 //-----------------------------------------------------------------------------

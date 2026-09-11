@@ -255,7 +255,24 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 { 
     if (bot_active && usergame && gamestate == GS_LEVEL && !demoplayback && players[consoleplayer].mo)
     {
-	Bot_BuildTiccmd(cmd, &players[consoleplayer]);
+	/* NetUpdate can queue several commands before the world advances. A local
+	   feedback controller must run at consumption time, not repeatedly against
+	   the same angle/velocity. Network commands still have to be transmitted. */
+	memset(cmd, 0, sizeof(*cmd));
+	if (netgame)
+	    Bot_BuildTiccmd(cmd, &players[consoleplayer]);
+	/* The bot normally returns before the manual-input path below. Preserve
+	   menu-generated pause/save requests while it is driving the player. */
+	if (sendpause)
+	{
+	    sendpause = false;
+	    cmd->buttons = BT_SPECIAL | BTS_PAUSE;
+	}
+	if (sendsave)
+	{
+	    sendsave = false;
+	    cmd->buttons = BT_SPECIAL | BTS_SAVEGAME | (savegameslot<<BTS_SAVESHIFT);
+	}
 	cmd->consistancy = consistancy[consoleplayer][maketic%BACKUPTICS];
 	return;
     }
@@ -553,6 +570,14 @@ void G_DoLoadLevel (void)
 // 
 boolean G_Responder (event_t* ev) 
 { 
+    if (gamestate == GS_LEVEL &&
+        (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE))) {
+        memset(gamekeydown, 0, sizeof(gamekeydown));
+        memset(mousearray, 0, sizeof(mousearray));
+        memset(joyarray, 0, sizeof(joyarray));
+        mousex = mousey = joyxmove = joyymove = 0;
+        return HU_Responder(ev);
+    }
     if (menuactive)
     {
 	if (ev->type == ev_keyup && ev->data1 < NUMKEYS)
@@ -638,7 +663,7 @@ boolean G_Responder (event_t* ev)
 	    S_StartSound(NULL, sfx_swtchn);
 	    return true;
 	}
-	if (ev->data1 == KEY_F10)
+	if (ev->data1 == KEY_F10 || ev->data1 == '\'')
 	{
 	    bot_active = !bot_active;
 	    players[consoleplayer].message = bot_active ? "BOT MODE: ACTIVE (AI PLAYING)" : "BOT MODE: OFF (MANUAL CONTROL)";
@@ -772,6 +797,15 @@ void G_Ticker (void)
  
 	    if (demoplayback) 
 		G_ReadDemoTiccmd (cmd); 
+	    else if (bot_active && !netgame && i == consoleplayer &&
+	             usergame && gamestate == GS_LEVEL && players[i].mo &&
+	             !paused && !(menuactive && players[i].viewz != 1) &&
+	             !(cmd->buttons & BT_SPECIAL))
+	    {
+	        short consistency = cmd->consistancy;
+	        Bot_BuildTiccmd(cmd, &players[i]);
+	        cmd->consistancy = consistency;
+	    }
 	    if (demorecording) 
 		G_WriteDemoTiccmd (cmd);
 	    

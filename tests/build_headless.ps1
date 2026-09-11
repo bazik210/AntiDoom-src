@@ -16,7 +16,7 @@ foreach ($source in $sources) {
         & gcc @flags @extra -c $source.FullName -o $object
         if ($LASTEXITCODE) { throw "Compilation failed: $($source.Name)" }
     }
-    if (!($Test -eq 'bot_run' -and $source.Name -eq 'p_bot.c')) { $objects += $object }
+    if (!(($Test -in @('bot_run','bot_tick_regression')) -and $source.Name -eq 'p_bot.c')) { $objects += $object }
 }
 $out = Join-Path $outdir ($Test + '.exe')
 & gcc @flags (Join-Path $PSScriptRoot ($Test + '.c')) (Join-Path $PSScriptRoot 'headless_platform.c') @objects -o $out -luser32 -lgdi32 -lwinmm -lws2_32 -ldbghelp -lm

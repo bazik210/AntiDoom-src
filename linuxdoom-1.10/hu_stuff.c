@@ -24,6 +24,9 @@ static const char
 rcsid[] = "$Id: hu_stuff.c,v 1.4 1997/02/03 16:47:52 b1 Exp $";
 
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "doomdef.h"
 
@@ -38,6 +41,12 @@ rcsid[] = "$Id: hu_stuff.c,v 1.4 1997/02/03 16:47:52 b1 Exp $";
 #include "s_sound.h"
 
 #include "doomstat.h"
+#include "g_game.h"
+#include "i_system.h"
+#include "v_video.h"
+
+extern boolean bot_active;
+extern int show_fps;
 
 // Data.
 #include "dstrings.h"
@@ -106,6 +115,124 @@ extern int		showMessages;
 extern boolean		automapactive;
 
 static boolean		headsupactive = false;
+
+boolean			console_on;
+static boolean		console_prev_paused;
+static hu_stext_t	w_console_output;
+static hu_itext_t	w_console_input;
+
+#define CONSOLE_HEIGHT 108
+
+static boolean CON_Equals(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return false;
+        ++a; ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static void CON_Print(const char *text)
+{
+    HUlib_addMessageToSText(&w_console_output, NULL, (char *)text);
+}
+
+static void CON_ResetInput(void)
+{
+    char prompt[] = "> ";
+    HUlib_resetIText(&w_console_input);
+    HUlib_addPrefixToIText(&w_console_input, prompt);
+}
+
+static void CON_Execute(void)
+{
+    char command[HU_MAXLINELENGTH+1];
+    char *name, *arg;
+    player_t *p = plr;
+
+    strcpy(command, w_console_input.l.l + w_console_input.lm);
+    if (!command[0]) {
+        CON_ResetInput();
+        return;
+    }
+
+    {
+        char echo[HU_MAXLINELENGTH+1];
+        strcpy(echo, w_console_input.l.l);
+        CON_Print(echo);
+    }
+
+    name = strtok(command, " \t");
+    arg = strtok(NULL, " \t");
+    if (!name) { CON_ResetInput(); return; }
+
+    if (CON_Equals(name, "help")) {
+        CON_Print("help map idclev bot god noclip give status fps clear");
+        CON_Print("give keys | give weapons | give all");
+    } else if (CON_Equals(name, "bot")) {
+        bot_active = !bot_active;
+        CON_Print(bot_active ? "BOT MODE: ON" : "BOT MODE: OFF");
+    } else if (CON_Equals(name, "god")) {
+        if (p) p->cheats ^= CF_GODMODE;
+        CON_Print(p && (p->cheats & CF_GODMODE) ? "GOD MODE: ON" : "GOD MODE: OFF");
+    } else if (CON_Equals(name, "noclip")) {
+        if (p) p->cheats ^= CF_NOCLIP;
+        CON_Print(p && (p->cheats & CF_NOCLIP) ? "NOCLIP: ON" : "NOCLIP: OFF");
+    } else if (CON_Equals(name, "give")) {
+        if (!arg || (!CON_Equals(arg, "keys") && !CON_Equals(arg, "weapons") &&
+                     !CON_Equals(arg, "all"))) {
+            CON_Print("usage: give keys|weapons|all");
+        } else if (p) {
+            int i;
+            if (CON_Equals(arg, "keys") || CON_Equals(arg, "all"))
+                for (i=0; i<NUMCARDS; ++i) p->cards[i] = true;
+            if (CON_Equals(arg, "weapons") || CON_Equals(arg, "all")) {
+                for (i=0; i<NUMWEAPONS; ++i) p->weaponowned[i] = true;
+                for (i=0; i<NUMAMMO; ++i) p->ammo[i] = p->maxammo[i];
+            }
+            CON_Print("GIVE: OK");
+        }
+    } else if (CON_Equals(name, "map") || CON_Equals(name, "idclev")) {
+        int map = arg ? atoi(arg) : 0;
+        if (map < 1 || map > 32) {
+            CON_Print("usage: map 1-32");
+        } else {
+            G_DeferedInitNew(gameskill, 1, map);
+            CON_Print("MAP CHANGE QUEUED");
+        }
+    } else if (CON_Equals(name, "status")) {
+        if (p)
+            sprintf(command, "MAP%02d HP=%d BOT=%s", gamemap, p->health,
+                    bot_active ? "ON" : "OFF");
+        else
+            strcpy(command, "NO PLAYER");
+        CON_Print(command);
+    } else if (CON_Equals(name, "fps")) {
+        show_fps = !show_fps;
+        CON_Print(show_fps ? "FPS: ON" : "FPS: OFF");
+    } else if (CON_Equals(name, "clear")) {
+        HUlib_initSText(&w_console_output, 4, 96, HU_MAXLINES, hu_font,
+                        HU_FONTSTART, &console_on);
+    } else {
+        CON_Print("UNKNOWN COMMAND (type help)");
+    }
+
+    CON_ResetInput();
+}
+
+static void CON_Toggle(void)
+{
+    if (!console_on) {
+        console_prev_paused = paused;
+        console_on = true;
+        paused = true;
+        CON_ResetInput();
+    } else {
+        console_on = false;
+        paused = console_prev_paused;
+    }
+}
 
 //
 // Builtin map names.
@@ -479,12 +606,28 @@ void HU_Start(void)
     for (i=0 ; i<MAXPLAYERS ; i++)
 	HUlib_initIText(&w_inputbuffer[i], 0, 0, 0, 0, &always_off);
 
+    console_on = false;
+    HUlib_initSText(&w_console_output, 4, 96, HU_MAXLINES, hu_font,
+                    HU_FONTSTART, &console_on);
+    HUlib_initIText(&w_console_input, 4, 4, hu_font,
+                    HU_FONTSTART, &console_on);
+    CON_ResetInput();
+
     headsupactive = true;
 
 }
 
 void HU_Drawer(void)
 {
+
+    if (console_on) {
+        int y, rows = CONSOLE_HEIGHT * SCREEN_MUL;
+        for (y=0; y<rows && y<SCREENHEIGHT; ++y)
+            memset(screens[0] + y*SCREENWIDTH, 0, SCREENWIDTH);
+        HUlib_drawSText(&w_console_output);
+        HUlib_drawIText(&w_console_input);
+        return;
+    }
 
     HUlib_drawSText(&w_message);
     HUlib_drawIText(&w_chat);
@@ -499,6 +642,8 @@ void HU_Erase(void)
     HUlib_eraseSText(&w_message);
     HUlib_eraseIText(&w_chat);
     HUlib_eraseTextLine(&w_title);
+    HUlib_eraseSText(&w_console_output);
+    HUlib_eraseIText(&w_console_input);
 
 }
 
@@ -635,6 +780,27 @@ boolean HU_Responder(event_t *ev)
     };
     
     static int		num_nobrainers = 0;
+
+    if (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE) {
+        CON_Toggle();
+        return true;
+    }
+    if (console_on) {
+        if (ev->type != ev_keydown)
+            return true;
+        if (ev->data1 == KEY_ESCAPE) {
+            CON_Toggle();
+            return true;
+        }
+        if (ev->data1 == KEY_ENTER) {
+            CON_Execute();
+            return true;
+        }
+        c = (unsigned char)ev->data1;
+        if (c >= 'a' && c <= 'z') c = (unsigned char)toupper(c);
+        HUlib_keyInIText(&w_console_input, c);
+        return true;
+    }
 
     numplayers = 0;
     for (i=0 ; i<MAXPLAYERS ; i++)
