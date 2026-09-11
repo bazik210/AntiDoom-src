@@ -26,6 +26,7 @@ rcsid[] = "$Id: g_game.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "doomdef.h" 
 #include "doomstat.h"
@@ -74,7 +75,7 @@ rcsid[] = "$Id: g_game.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include "p_bot.h"
 
 
-#define SAVEGAMESIZE	0x2c000
+#define MAX_SAVEFILE_SIZE (128 * 1024 * 1024)
 #define SAVESTRINGSIZE	24
 
 
@@ -252,10 +253,10 @@ int G_CmdChecksum (ticcmd_t* cmd)
 // 
 void G_BuildTiccmd (ticcmd_t* cmd) 
 { 
-    if (bot_active && usergame && gamestate == GS_LEVEL && !demoplayback && players[consoleplayer].playerstate == PST_LIVE && players[consoleplayer].mo)
+    if (bot_active && usergame && gamestate == GS_LEVEL && !demoplayback && players[consoleplayer].mo)
     {
-	cmd->consistancy = consistancy[consoleplayer][maketic%BACKUPTICS];
 	Bot_BuildTiccmd(cmd, &players[consoleplayer]);
+	cmd->consistancy = consistancy[consoleplayer][maketic%BACKUPTICS];
 	return;
     }
 
@@ -1308,25 +1309,138 @@ void G_LoadGame (char* name)
  
 #define VERSIONSIZE		16 
 
+#define SAVE_FOOTER_SIZE 40
+static const char save_version[VERSIONSIZE] = "AntiDoom save 2";
+static const byte save_magic[8] = {'A','D','S','A','V','E','2',0};
+
+static uint64_t G_SaveHash(uint64_t hash, const void *data, size_t size)
+{
+    const byte *p = data;
+    while (size--) { hash ^= *p++; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+
+static void G_SavePut64(byte *p, uint64_t value)
+{
+    int i;
+    for (i=0;i<8;++i) { p[i]=(byte)value; value >>= 8; }
+}
+
+static uint64_t G_SaveGet64(const byte *p)
+{
+    int i;
+    uint64_t result = 0;
+    for (i=7;i>=0;--i) result=(result<<8)|p[i];
+    return result;
+}
+
+/* Hash loaded resources in load order, including contents. A filename or map
+   number alone cannot distinguish DOOM/DOOM II, replacement maps, or PWADs. */
+static uint64_t G_SaveWadHash(void)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    byte *buffer = NULL, sizebytes[8];
+    size_t capacity = 0;
+    int i;
+    for (i=0;i<numlumps;++i) {
+        size_t size = W_LumpLength(i);
+        if (size>capacity) {
+            byte *next = realloc(buffer,size);
+            if (!next) { free(buffer); return 0; }
+            buffer=next; capacity=size;
+        }
+        G_SavePut64(sizebytes,size);
+        hash=G_SaveHash(hash,lumpinfo[i].name,8);
+        hash=G_SaveHash(hash,sizebytes,8);
+        if (size) { W_ReadLump(i,buffer); hash=G_SaveHash(hash,buffer,size); }
+    }
+    free(buffer);
+    return hash;
+}
+
+static uint64_t G_SaveAbiHash(void)
+{
+    const size_t sizes[] = {sizeof(void*),sizeof(player_t),sizeof(mobj_t),
+        sizeof(ceiling_t),sizeof(vldoor_t),sizeof(floormove_t),sizeof(plat_t),
+        sizeof(lightflash_t),sizeof(strobe_t),sizeof(glow_t),NUMSTATES,NUMMOBJTYPES};
+    uint64_t hash=UINT64_C(14695981039346656037);
+    byte b[8];
+    size_t i;
+    for (i=0;i<sizeof(sizes)/sizeof(sizes[0]);++i) {
+        G_SavePut64(b,sizes[i]); hash=G_SaveHash(hash,b,8);
+    }
+    return hash;
+}
+
+static void G_RejectSave(char *message)
+{
+    free(savebuffer); savebuffer=save_p=NULL;
+    I_Log("Savegame rejected: %s\n",message);
+    M_StartMessage(message,NULL,false);
+}
+
 
 void G_DoLoadGame (void) 
 { 
     int		length; 
     int		i; 
     int		a,b,c; 
-    char	vcheck[VERSIONSIZE]; 
+    FILE *file;
+    long file_length;
+    byte *footer;
+    uint64_t wad_hash;
+    char mapname[9];
 	 
     gameaction = ga_nothing; 
 	 
-    length = M_ReadFile (savename, &savebuffer); 
-    save_p = savebuffer + SAVESTRINGSIZE;
-    
-    // skip the description field 
-    memset (vcheck,0,sizeof(vcheck)); 
-    sprintf (vcheck,"version %i",VERSION); 
-    if (strcmp (save_p, vcheck)) 
-	return;				// bad version 
-    save_p += VERSIONSIZE; 
+    savebuffer=save_p=NULL;
+    file=fopen(savename,"rb");
+    if (!file) { G_RejectSave("CANNOT READ SAVEGAME."); return; }
+    if (fseek(file,0,SEEK_END) || (file_length=ftell(file))<0 ||
+        file_length>MAX_SAVEFILE_SIZE || fseek(file,0,SEEK_SET)) {
+        fclose(file); G_RejectSave("INVALID SAVEGAME FILE."); return;
+    }
+    length=(int)file_length;
+    if (length<SAVESTRINGSIZE+VERSIONSIZE) {
+        fclose(file); G_RejectSave("SAVEGAME IS DAMAGED OR INCOMPLETE."); return;
+    }
+    savebuffer=malloc(length);
+    if (!savebuffer) { fclose(file); G_RejectSave("NOT ENOUGH MEMORY TO LOAD SAVEGAME."); return; }
+    if (fread(savebuffer,1,length,file)!=(size_t)length) {
+        fclose(file); G_RejectSave("CANNOT READ SAVEGAME."); return;
+    }
+    fclose(file);
+    if (memcmp(savebuffer+SAVESTRINGSIZE,save_version,VERSIONSIZE)) {
+        G_RejectSave("OLD OR INCOMPATIBLE SAVEGAME.\nWAD ID CANNOT BE VERIFIED.\nSTART A NEW GAME AND SAVE AGAIN."); return;
+    }
+    if (length < SAVESTRINGSIZE+VERSIONSIZE+10+3+SAVE_FOOTER_SIZE) {
+        G_RejectSave("SAVEGAME IS DAMAGED OR INCOMPLETE."); return;
+    }
+    footer=savebuffer+length-SAVE_FOOTER_SIZE;
+    if (memcmp(footer,save_magic,8) || G_SaveGet64(footer+24)!=(uint64_t)(footer-savebuffer) ||
+        footer[-1]!=0x1d || G_SaveGet64(footer+32)!=G_SaveHash(UINT64_C(14695981039346656037),savebuffer,footer-savebuffer)) {
+        G_RejectSave("SAVEGAME IS DAMAGED OR INCOMPLETE."); return;
+    }
+    if (G_SaveGet64(footer+16)!=G_SaveAbiHash()) {
+        G_RejectSave("SAVEGAME USES A DIFFERENT\nENGINE FORMAT."); return;
+    }
+    wad_hash=G_SaveWadHash();
+    if (!wad_hash || G_SaveGet64(footer+8)!=wad_hash) {
+        G_RejectSave("SAVEGAME IS NOT COMPATIBLE\nWITH THE CURRENT WAD FILES."); return;
+    }
+    /* Validate before G_InitNew destroys the current level. */
+    save_p=savebuffer+SAVESTRINGSIZE+VERSIONSIZE;
+    if (save_p[0]>sk_nightmare || save_p[1]<1 || save_p[1]>4 || save_p[2]<1 ||
+        save_p[2]>(gamemode==commercial ? 32 : 9)) {
+        G_RejectSave("INVALID SAVEGAME LEVEL."); return;
+    }
+    if (gamemode==commercial) snprintf(mapname,sizeof(mapname),"MAP%02d",save_p[2]);
+    else snprintf(mapname,sizeof(mapname),"E%dM%d",save_p[1],save_p[2]);
+    if (W_CheckNumForName(mapname)<0) { G_RejectSave("SAVEGAME LEVEL IS NOT IN THIS WAD."); return; }
+    for (i=0;i<MAXPLAYERS;++i) if (save_p[3+i]>1) {
+        G_RejectSave("INVALID SAVEGAME PLAYER DATA."); return;
+    }
+    if (!save_p[3+consoleplayer]) { G_RejectSave("INVALID SAVEGAME PLAYER DATA."); return; }
 			 
     gameskill = *save_p++; 
     gameepisode = *save_p++; 
@@ -1353,7 +1467,7 @@ void G_DoLoadGame (void)
 	I_Error ("Bad savegame");
     
     // done 
-    Z_Free (savebuffer); 
+    free(savebuffer); savebuffer=save_p=NULL;
  
     if (setsizeneeded)
 	R_ExecuteSetViewSize ();
@@ -1380,6 +1494,7 @@ void G_DoLoadGame (void)
     D_ResetTimer ();
     I_ResetMouse ();
     P_ClearInterpolation ();
+    Bot_InitLevel();
 } 
  
 
@@ -1401,10 +1516,11 @@ G_SaveGame
 void G_DoSaveGame (void) 
 { 
     char	name[100]; 
-    char	name2[VERSIONSIZE]; 
     char*	description; 
     int		length; 
     int		i; 
+    size_t capacity;
+    uint64_t wad_hash;
 	
     if (M_CheckParm("-cdrom"))
 	sprintf(name,"c:\\doomdata\\"SAVEGAMENAME"%d.dsg",savegameslot);
@@ -1412,13 +1528,19 @@ void G_DoSaveGame (void)
 	sprintf (name,SAVEGAMENAME"%d.dsg",savegameslot); 
     description = savedescription; 
 	 
-    save_p = savebuffer = screens[1]+0x4000; 
+    gameaction=ga_nothing;
+    capacity=P_SaveGameCapacity();
+    if (capacity>MAX_SAVEFILE_SIZE || !(savebuffer=calloc(1,capacity))) {
+        savebuffer=save_p=NULL;
+        M_StartMessage("NOT ENOUGH MEMORY TO SAVE GAME.",NULL,false); return;
+    }
+    save_p=savebuffer;
+    wad_hash=G_SaveWadHash();
+    if (!wad_hash) { G_RejectSave("CANNOT IDENTIFY WAD FILES."); return; }
 	 
     memcpy (save_p, description, SAVESTRINGSIZE); 
     save_p += SAVESTRINGSIZE; 
-    memset (name2,0,sizeof(name2)); 
-    sprintf (name2,"version %i",VERSION); 
-    memcpy (save_p, name2, VERSIONSIZE); 
+    memcpy (save_p, save_version, VERSIONSIZE);
     save_p += VERSIONSIZE; 
 	 
     *save_p++ = gameskill; 
@@ -1438,9 +1560,16 @@ void G_DoSaveGame (void)
     *save_p++ = 0x1d;		// consistancy marker 
 	 
     length = save_p - savebuffer; 
-    if (length > SAVEGAMESIZE) 
-	I_Error ("Savegame buffer overrun"); 
-    M_WriteFile (name, savebuffer, length); 
+    memcpy(save_p,save_magic,8);
+    G_SavePut64(save_p+8,wad_hash);
+    G_SavePut64(save_p+16,G_SaveAbiHash());
+    G_SavePut64(save_p+24,length);
+    G_SavePut64(save_p+32,G_SaveHash(UINT64_C(14695981039346656037),savebuffer,length));
+    length += SAVE_FOOTER_SIZE;
+    if (!M_WriteFile(name,savebuffer,length)) {
+        G_RejectSave("COULD NOT WRITE SAVEGAME."); return;
+    }
+    free(savebuffer); savebuffer=save_p=NULL;
     gameaction = ga_nothing; 
     savedescription[0] = 0;		 
 	 

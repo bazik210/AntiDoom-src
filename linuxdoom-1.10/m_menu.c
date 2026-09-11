@@ -532,8 +532,11 @@ void M_ReadSaveStrings(void)
 	    LoadMenu[i].status = 0;
 	    continue;
 	}
+	memset(savegamestrings[i],0,SAVESTRINGSIZE);
 	count = read (handle, &savegamestrings[i], SAVESTRINGSIZE);
 	close (handle);
+	savegamestrings[i][SAVESTRINGSIZE-1] = 0;
+	if (count <= 0) strcpy(savegamestrings[i],"INVALID SAVEGAME");
 	LoadMenu[i].status = 1;
     }
 }
