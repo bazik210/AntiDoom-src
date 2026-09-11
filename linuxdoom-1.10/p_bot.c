@@ -36,17 +36,35 @@ typedef struct {
 
 static bot_cell_t *cells;
 static int *heap, *path, *line_tries, *line_retry, *line_used, *sector_visits, *run_marks;
+static unsigned char *line_key_memory;
 static int width, height, count, stamp, heap_count, path_len, path_step;
 static fixed_t orgx, orgy;
 static bot_goal_t goal;
 static int next_plan, last_sector, stuck_since, last_progress;
+static int next_ledge_diagnostic;
 static fixed_t last_x, last_y, progress_dist;
 static int use_until, last_keys;
+static int next_key_memory_scan;
+
+/* After acquiring a key, keep progression intent alive even when the matching
+   keyed line is currently outside the reachable flood component (for example
+   MAP02: ordinary door first, red-key columns behind it). */
+static int key_progress_mask = 0;
 static mobj_t *combat_target, *ignored_target;
 static int combat_health, combat_progress, ignore_until;
 static fixed_t probe_radius = BOT_RADIUS;
 static int commit_forward_until = 0;
 static int exit_commit_until = 0;
+
+/* After a remote switch/platform button, do not instantly abandon the room for
+   old ammo.  Briefly watch the interaction, then keep the next decisions local
+   while the triggered geometry has time to move. */
+static int post_use_hold_until = 0;
+static int post_use_local_until = 0;
+static int post_use_line = -1;
+static int post_use_sector = -1;
+static fixed_t post_use_x = 0, post_use_y = 0;
+static fixed_t post_use_look_x = 0, post_use_look_y = 0;
 
 /* Combat hysteresis.  A target must be genuinely shootable to steal the
    navigation angle.  Short LOS flickers keep the old view angle, but never
@@ -132,6 +150,7 @@ static boolean Bot_IsExitSpecial(int special)
 }
 
 static boolean Bot_CanUsePoint(fixed_t x, fixed_t y, angle_t angle, line_t *wanted);
+static boolean Bot_Manual(int s);
 
 /* Separate scratch state: P_CheckPosition can collect pickups, damage things,
    and overwrite the physics spechit array. Planning must do none of that. */
@@ -161,7 +180,7 @@ static boolean Bot_ProbeThing(mobj_t *mo)
     fixed_t radius;
     if (mo == probe.self || !(mo->flags & MF_SOLID)) return true;
     /* Moving actors are handled by steering and combat, not baked into routes. */
-    if (!probe.actors && (mo->flags & MF_SHOOTABLE)) return true;
+    if (!probe.actors && (mo->flags & MF_SHOOTABLE) && mo->type != MT_BARREL) return true;
     radius = mo->radius + probe_radius;
     return abs(mo->x - probe.x) >= radius || abs(mo->y - probe.y) >= radius;
 }
@@ -238,10 +257,12 @@ static boolean Bot_LedgeSafe(fixed_t x, fixed_t y)
 {
     static const int ox[8] = { 1,-1, 0, 0, 1, 1,-1,-1 };
     static const int oy[8] = { 0, 0, 1,-1, 1,-1, 1,-1 };
-    /* Smaller than the player radius on purpose: on a 32-wide stair the
-       centre line must remain a valid safe lane, while the 8-unit edge lanes
-       should be discouraged. */
-    const fixed_t r = PLAYERRADIUS - 3*FRACUNIT;
+    /* Keep almost the whole player footprint supported.  The old 13-unit
+       sample radius still let a 16-radius player hang several units over the
+       inner edge of a narrow stair; with residual momentum that was enough to
+       turn an otherwise legal waypoint into a fall.  One unit of tolerance is
+       kept for blockmap / fixed-point boundary noise. */
+    const fixed_t r = PLAYERRADIUS - FRACUNIT;
     fixed_t base = R_PointInSubsector(x,y)->sector->floorheight;
     int i;
 
@@ -329,51 +350,87 @@ static int Bot_DropClearance(fixed_t x, fixed_t y)
     return 48;
 }
 
-/* Never aim directly at the item after the flood path has ended.  On MAP02
-   that final innocent-looking vector is exactly what cuts across the hole in
-   front of the red key.  The goal cell was selected because it is reachable;
-   find a nearby, supported pickup point and let Doom's pickup radius do the
-   rest. */
+/* Pick a final item approach without ever inventing a diagonal shortcut.
+   The flood-selected cell is at most a few grid cells from the item.  Project
+   the item onto one of the two cardinal lanes through that cell and stop as
+   soon as we are comfortably inside pickup range.  This is deliberately less
+   clever than the old radial search: the radial search re-selected the point
+   nearest to the player every tic, which could turn the last MAP02 stair step
+   into exactly the diagonal across the hole that precision mode was meant to
+   forbid. */
 static boolean Bot_FindSafeItemApproach(mobj_t *mo, fixed_t ix, fixed_t iy, int cell,
                                         fixed_t *outx, fixed_t *outy)
 {
-    static const int ring[] = { 0, 8, 16, 24, 28 };
-    fixed_t bestx=0, besty=0;
-    int best=INT_MAX, r, k;
+    const double pickup = 20.0; /* player + key/item touch radius has margin */
+    fixed_t fx, fy, floor;
+    int first_axis = 0;         /* 1 = X/horizontal, 2 = Y/vertical */
+    int pass;
 
-    if (!mo || !outx || !outy) return false;
+    if (!mo || !outx || !outy || cell < 0 || cell >= count) return false;
+    fx = Bot_X(cell);
+    fy = Bot_Y(cell);
 
-    /* The flood-selected cell is the best first candidate and is normally
-       already within pickup distance of a key. */
-    if (cell >= 0 && cell < count) {
-        fixed_t x=Bot_X(cell), y=Bot_Y(cell), floor;
-        if (Bot_Position(x,y,mo,true,&floor) && abs(floor-mo->z) <= 24*FRACUNIT &&
-            Bot_LedgeSafe(x,y) && Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,x,y,mo,true)) {
-            bestx=x; besty=y;
-            best=P_AproxDistance(x-mo->x,y-mo->y)/FRACUNIT;
-        }
+    /* Prefer continuing in the direction of the final flood edge.  If that
+       projection is unsafe, try one 90-degree cardinal turn on the landing
+       platform.  We never use an arbitrary-angle ring point here. */
+    if (path_len >= 2 && path[path_len-1] == cell) {
+        int prev = path[path_len-2];
+        int dx = (cell%width) - (prev%width);
+        int dy = (cell/width) - (prev/width);
+        if (dx && !dy) first_axis = 1;
+        else if (dy && !dx) first_axis = 2;
     }
 
-    /* If the grid centre is awkward, search a small ring around the item.  We
-       stay within 28 units, comfortably inside the usual player+pickup touch
-       radius, but reject any point whose footprint faces a tall drop. */
-    for (r=0; r<(int)(sizeof(ring)/sizeof(ring[0])); ++r) {
-        for (k=0; k<16; ++k) {
-            int an=(k*FINEANGLES)/16;
-            fixed_t x=ix + FixedMul(ring[r]*FRACUNIT,finecosine[an]);
-            fixed_t y=iy + FixedMul(ring[r]*FRACUNIT,finesine[an]);
-            fixed_t floor;
-            int score;
-            if (!Bot_Position(x,y,mo,true,&floor) || abs(floor-mo->z)>24*FRACUNIT) continue;
-            if (!Bot_LedgeSafe(x,y)) continue;
-            if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
-            score=P_AproxDistance(x-mo->x,y-mo->y)/FRACUNIT;
-            if (score < best) { best=score; bestx=x; besty=y; }
-        }
+    if (!first_axis) {
+        /* A one-cell path is rare here.  Choose the axis that needs less
+           perpendicular offset to enter the item's pickup circle. */
+        first_axis = abs(iy-fy) <= abs(ix-fx) ? 1 : 2;
     }
-    if (best==INT_MAX) return false;
-    *outx=bestx; *outy=besty;
-    return true;
+
+    for (pass=0; pass<2; ++pass) {
+        int axis = pass ? (first_axis==1 ? 2 : 1) : first_axis;
+        fixed_t x=fx, y=fy;
+        double perp, along_allow, delta, adelta, sign;
+
+        if (axis == 1) {
+            /* Stay on the final Y lane and advance only in X. */
+            perp = fabs((double)(iy-fy))/FRACUNIT;
+            if (perp > pickup) continue;
+            along_allow = sqrt(pickup*pickup - perp*perp);
+            delta = (double)(ix-fx)/FRACUNIT;
+            adelta = fabs(delta);
+            if (adelta > along_allow) {
+                sign = delta < 0.0 ? -1.0 : 1.0;
+                x = ix - (fixed_t)(sign*along_allow*FRACUNIT);
+            }
+        } else {
+            /* Stay on the final X lane and advance only in Y. */
+            perp = fabs((double)(ix-fx))/FRACUNIT;
+            if (perp > pickup) continue;
+            along_allow = sqrt(pickup*pickup - perp*perp);
+            delta = (double)(iy-fy)/FRACUNIT;
+            adelta = fabs(delta);
+            if (adelta > along_allow) {
+                sign = delta < 0.0 ? -1.0 : 1.0;
+                y = iy - (fixed_t)(sign*along_allow*FRACUNIT);
+            }
+        }
+
+        if (!Bot_Position(x,y,mo,true,&floor) || abs(floor-mo->z)>24*FRACUNIT) continue;
+        if (!Bot_LedgeSafe(x,y)) continue;
+        if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,x,y,mo,true)) continue;
+        *outx=x; *outy=y;
+        return true;
+    }
+
+    /* Last resort: hold the final flood cell.  Do not trade safety for a raw
+       item vector; the next replan may find a different safe final cell. */
+    if (Bot_Position(fx,fy,mo,true,&floor) && abs(floor-mo->z)<=24*FRACUNIT &&
+        Bot_LedgeSafe(fx,fy) && Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,fx,fy,mo,true)) {
+        *outx=fx; *outy=fy;
+        return true;
+    }
+    return false;
 }
 
 static boolean Bot_Cell(int c)
@@ -434,6 +491,48 @@ static int Bot_NearCell(fixed_t x, fixed_t y, fixed_t z, boolean reached)
 }
 
 
+/* Precision traversal needs a stronger start-cell rule than ordinary routing.
+   The player may be a few units off the 8-unit grid after a momentum landing.
+   Bot_NearCell() is allowed to choose a cell reachable only by stepping down,
+   which is fine for normal navigation but fatal beside MAP02's stairwell.
+
+   Search a slightly wider neighborhood and require a fully ledge-safe segment
+   from the player's real position to the candidate grid centre. */
+static int Bot_NearLedgeStart(mobj_t *mo)
+{
+    int gx, gy, dx, dy;
+    int best=-1, bestscore=INF;
+
+    if (!mo) return -1;
+
+    gx = (mo->x-orgx + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
+    gy = (mo->y-orgy + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
+
+    for (dy=-4; dy<=4; ++dy) for (dx=-4; dx<=4; ++dx) {
+        int nx=gx+dx, ny=gy+dy, c, score;
+
+        if (nx<0 || ny<0 || nx>=width || ny>=height) continue;
+        c=ny*width+nx;
+        if (!Bot_Cell(c) || !cells[c].ledge_safe) continue;
+        if (abs(cells[c].floor-mo->z) > 24*FRACUNIT) continue;
+
+        if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,
+                               Bot_X(c),Bot_Y(c),mo,false))
+            continue;
+
+        score=P_AproxDistance(mo->x-Bot_X(c),mo->y-Bot_Y(c))/FRACUNIT;
+        if (!cells[c].comfortable) score += 8;
+
+        if (score < bestscore) {
+            bestscore=score;
+            best=c;
+        }
+    }
+
+    return best;
+}
+
+
 /* A conservative physical test for a Doom-style "jump": there is no jump
    command, so the player must build horizontal momentum on a high ledge and
    cross a short lower-floor gap before gravity drops him too far.  We reject
@@ -452,6 +551,12 @@ static boolean Bot_RunLinkGeometry(int start, int land)
     tx = Bot_X(land);  ty = Bot_Y(land);
     start_floor = cells[start].floor;
     end_floor = cells[land].floor;
+
+    /* The collision probe can borrow the floor of a nearby stair while its
+       centre is still over a pit. Such an endpoint cannot satisfy the landing
+       check in Bot_RunCommand and makes the bot keep running past the ledge. */
+    if (end_floor - R_PointInSubsector(tx,ty)->sector->floorheight > 24*FRACUNIT)
+        return false;
 
     dx = (double)tx - sx;
     dy = (double)ty - sy;
@@ -542,10 +647,21 @@ static boolean Bot_RunCandidateToPoint(fixed_t x, fixed_t y, fixed_t z, int prio
         int land = path[qi], lx = land%width, ly = land/width;
         int boundary = 0, d, k;
 
+        /* Off-mesh traversal is for unreachable landings. A blocked item
+           centre must not turn an already reachable staircase into a jump. */
+        if (cells[land].stamp == stamp && cells[land].dist < INF) continue;
+
         for (d = 0; d < 8; ++d) {
             int nx=lx+ndx[d], ny=ly+ndy[d];
             if (nx < 0 || ny < 0 || nx >= width || ny >= height ||
                 run_marks[ny*width+nx] != run_stamp) { boundary = 1; break; }
+            /* The reverse flood includes cells hanging over the lip. Also
+               search the actual floor edge, otherwise rejecting those false
+               landings would discard the legitimate first jump as well. */
+            if (cells[ny*width+nx].floor -
+                R_PointInSubsector(Bot_X(ny*width+nx),Bot_Y(ny*width+nx))->sector->floorheight > 24*FRACUNIT) {
+                boundary = 1; break;
+            }
         }
         if (!boundary) continue;
 
@@ -602,7 +718,14 @@ static void Bot_Flood(player_t *player)
     int start, i;
     boolean protect_ledge = (forced_item_active && leveltime < forced_item_until);
     ++stamp; heap_count = 0;
-    start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
+    if (protect_ledge)
+        start = Bot_NearLedgeStart(player->mo);
+    else
+        start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
+
+    /* Do not fall back to an ordinary, drop-permitting start during precision
+       traversal. A transient off-grid position is better handled by a quick
+       retry than by constructing a path whose very first edge is unusable. */
     if (start < 0) return;
     cells[start].dist = 0; heap[heap_count++] = start; cells[start].heap = 0;
     while (heap_count) {
@@ -668,9 +791,85 @@ static int Bot_Key(int special)
     }
     return -1;
 }
+
+/* Remember key-locked interactions that the player has actually encountered.
+   The planner knows all linedefs geometrically, but before this memory it simply
+   discarded a colored door while the key was missing.  After obtaining the key
+   there was therefore no "unfinished business" signal and generic exploration
+   could win.
+
+   We intentionally use proximity rather than omniscient map-wide marking:
+   getting within 256 map units is enough to count as having seen/encountered the
+   colored door/column. This remains true even if the key is already owned:
+   bars first discovered behind a newly opened colored door still become
+   unfinished business. The memory persists until the interaction is completed. */
+static void Bot_RememberNearbyLockedLines(player_t *p)
+{
+    int i;
+    mobj_t *mo;
+
+    if (!p || !(mo=p->mo) || !line_key_memory) return;
+    if (leveltime < next_key_memory_scan) return;
+    next_key_memory_scan = leveltime + 8;
+
+    for (i=0; i<numlines; ++i) {
+        line_t *li=&lines[i];
+        int key=Bot_Key(li->special);
+        double vx, vy, wx, wy, vv, t;
+        fixed_t px, py;
+
+        if (key < 0 || line_key_memory[i]) continue;
+
+        /* If this keyed line was already conclusively used, it is no longer
+           unfinished business. Manual doors are handled by their open/cross
+           state below and may keep their special after activation. */
+        if (line_used[i] && !Bot_Manual(li->special)) continue;
+
+        vx=(double)li->v2->x-li->v1->x;
+        vy=(double)li->v2->y-li->v1->y;
+        vv=vx*vx+vy*vy;
+        if (vv <= 0.0) continue;
+
+        wx=(double)mo->x-li->v1->x;
+        wy=(double)mo->y-li->v1->y;
+        t=(wx*vx+wy*vy)/vv;
+        if (t<0.0) t=0.0;
+        else if (t>1.0) t=1.0;
+
+        px=li->v1->x+(fixed_t)(vx*t);
+        py=li->v1->y+(fixed_t)(vy*t);
+
+        if (P_AproxDistance(px-mo->x,py-mo->y) <= 256*FRACUNIT) {
+            line_key_memory[i]=1;
+            I_Log("Bot: remembered locked line=%d key=%d\n",i,key);
+        }
+    }
+}
 static boolean Bot_Manual(int s)
 {
     return s==1 || s==26 || s==27 || s==28 || s==31 || s==32 || s==33 || s==34 || s==117 || s==118;
+}
+
+/* Some doors use repeatable tagged switch actions on the doorway itself.
+   MAP02 lines 101/102 are type 114 and operate their adjacent sector (tag 5).
+   They close again, so neither switch-use penalties nor "press and observe"
+   handling apply. A remote wall button with the same action stays a switch. */
+static boolean Bot_UseDoor(line_t *li)
+{
+    if (Bot_Manual(li->special)) return true;
+    switch (li->special) {
+        case 61: case 63: case 114: case 115:
+            return li->tag && li->backsector && li->backsector->tag == li->tag;
+    }
+    return false;
+}
+
+static void Bot_ClearKeyProgressForSpecial(int special)
+{
+    int key=Bot_Key(special);
+    if (key < 0) return;
+
+    key_progress_mask &= ~(1<<key);
 }
 static boolean Bot_UseSpecial(int s)
 {
@@ -714,6 +913,55 @@ static boolean Bot_Candidate(bot_goaltype_t type, fixed_t x, fixed_t y, fixed_t 
     return true; /* reachable, even if another goal currently scores better */
 }
 
+/* Items are collected by touching them, not by standing at their origin.
+   MAP02's red skull is exactly PLAYERRADIUS from a wall: BOT_RADIUS makes
+   walking to that origin impossible even though the pickup lane is clear. */
+static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
+{
+    fixed_t pickup = p->mo->radius + item->radius - 4*FRACUNIT;
+    int gx = (item->x-orgx + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
+    int gy = (item->y-orgy + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
+    int dx, dy, reach, best = -1, best_dist = INF;
+    boolean protect_ledge = forced_item_active && leveltime < forced_item_until;
+
+    /* Stay well inside Doom's square touch range, including waypoint error.
+       The final precision approach uses the same 20-unit pickup envelope. */
+    if (pickup > 20*FRACUNIT) pickup = 20*FRACUNIT;
+    if (pickup <= 0) return false;
+    reach = pickup / (GRID*FRACUNIT) + 1;
+    for (dy = -reach; dy <= reach; ++dy) for (dx = -reach; dx <= reach; ++dx) {
+        int nx = gx+dx, ny = gy+dy, c;
+        fixed_t delta;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        c = ny*width+nx;
+        if (cells[c].stamp != stamp || cells[c].dist == INF || !cells[c].clear) continue;
+        if (protect_ledge && !cells[c].ledge_safe) continue;
+        if (P_AproxDistance(item->x-Bot_X(c),item->y-Bot_Y(c)) > pickup) continue;
+        /* P_TouchSpecialThing also requires the item to be within vertical
+           reach. A nearby cell at the bottom of a pit is not a pickup route. */
+        delta = item->z-cells[c].floor;
+        if (delta > p->mo->height || delta < -8*FRACUNIT) continue;
+        if (cells[c].dist < best_dist) { best = c; best_dist = cells[c].dist; }
+    }
+    if (best < 0) return false;
+    if (best_dist + priority < goal.score) {
+        goal.type = GO_ITEM;
+
+        /* x/y are the reachable pickup checkpoint.  aimx/aimy keep the real
+           item origin for forced-item identity and diagnostics.  Keeping these
+           two meanings separate is important: after the previous change the
+           bot moved to goal.cell but completion still measured distance to the
+           raw item origin, so it could sit motionless until the 350-tic replan. */
+        goal.x = Bot_X(best);
+        goal.y = Bot_Y(best);
+        goal.aimx = item->x;
+        goal.aimy = item->y;
+
+        goal.line = -1; goal.cell = best; goal.score = best_dist + priority;
+    }
+    return true;
+}
+
 static int Bot_ItemPriority(player_t *p, mobj_t *mo)
 {
     switch (mo->sprite) {
@@ -739,10 +987,10 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_ARM1: case SPR_ARM2:
             return p->armorpoints < 100 ? -1400 : INF;
 
-        /* === Патроны — теперь подбираем заранее === */
+        /* === РџР°С‚СЂРѕРЅС‹ вЂ” С‚РµРїРµСЂСЊ РїРѕРґР±РёСЂР°РµРј Р·Р°СЂР°РЅРµРµ === */
         case SPR_CLIP: case SPR_AMMO:
-            if (p->ammo[am_clip] < 50) return -1600;   // было 30
-            if (p->ammo[am_clip] < 100) return -600;   // даже когда средне — всё равно полезно
+            if (p->ammo[am_clip] < 50) return -1600;   // Р±С‹Р»Рѕ 30
+            if (p->ammo[am_clip] < 100) return -600;   // РґР°Р¶Рµ РєРѕРіРґР° СЃСЂРµРґРЅРµ вЂ” РІСЃС‘ СЂР°РІРЅРѕ РїРѕР»РµР·РЅРѕ
             return INF;
 
         case SPR_SHEL: case SPR_SBOX:
@@ -822,6 +1070,15 @@ static void Bot_CheckPendingUse(void)
     fired = li->special != pending_use_special || Bot_LineActionActive(li);
     if (fired) {
         line_used[pending_use_line] = leveltime;
+        if (line_key_memory)
+            line_key_memory[pending_use_line] = 0;
+        Bot_ClearKeyProgressForSpecial(pending_use_special);
+
+        /* A real tagged action just started. Keep the bot nearby long enough to
+           observe/use the result instead of immediately shopping for ammo. */
+        if (pending_use_line == post_use_line && leveltime + 105 > post_use_local_until)
+            post_use_local_until = leveltime + 105;
+
         I_Log("Bot: confirmed switch line=%d special=%d\n",
               pending_use_line,pending_use_special);
         pending_use_line = -1;
@@ -838,8 +1095,57 @@ static void Bot_Plan(player_t *p)
     int i, n;
     thinker_t *th;
     boolean forced_seen = false;
+    boolean key_progress;
+    int key_target_line = -1;
+    fixed_t key_target_x = 0, key_target_y = 0;
+    int key_target_score = INF;
+
     Bot_Flood(p);
 	boolean prefer_forward = (leveltime < commit_forward_until);
+
+    /* A long route or a fight must not erase the reason for finding the key.
+       Clear the intent on confirmed use, or when no matching target remains. */
+    key_progress = key_progress_mask != 0;
+
+    /* The important part: discover the desired keyed interaction WITHOUT
+       requiring it to be reachable yet. Bot_Candidate cannot do that because
+       it deliberately searches only the current flood component. */
+    if (key_progress) {
+        for (i=0; i<numlines; ++i) {
+            line_t *li=&lines[i];
+            int key=Bot_Key(li->special);
+            fixed_t mx, my;
+            int score;
+
+            if (key < 0 || !(key_progress_mask & (1<<key)) || !Bot_HasKey(p,key))
+                continue;
+
+            /* A confirmed non-manual keyed switch is already finished. */
+            if (line_used[i] && !Bot_Manual(li->special))
+                continue;
+
+            mx=li->v1->x + li->dx/2;
+            my=li->v1->y + li->dy/2;
+            score=P_AproxDistance(mx-p->mo->x,my-p->mo->y)/FRACUNIT;
+
+            /* If we actually encountered this keyed object before, prefer it. */
+            if (line_key_memory && line_key_memory[i])
+                score -= 1200;
+
+            if (score < key_target_score) {
+                key_target_score=score;
+                key_target_line=i;
+                key_target_x=mx;
+                key_target_y=my;
+            }
+        }
+    }
+
+    if (key_progress && key_target_line < 0) {
+        key_progress_mask = 0;
+        key_progress = false;
+    }
+
     goal.type = GO_NONE; goal.score = INF; goal.line = -1; path_len = path_step = 0;
     for (i = 0; i < numlines; ++i) {
         line_t *li = &lines[i];
@@ -853,13 +1159,13 @@ static void Bot_Plan(player_t *p)
                progression.  Hard-ignore it for a while, then keep a large
                penalty so unexplored space, keys and new switches win.  Manual
                doors and exits have their own continuation semantics. */
-            if (!Bot_Manual(special) && !Bot_IsExitSpecial(special) && line_used[i]) {
+            if (!Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i]) {
                 if (used_age < USED_SWITCH_HARD_COOLDOWN) continue;
             }
 
             /* Already-open manual doors need no interaction.  Test the actual
                line opening, not just the back sector's nominal height. */
-            if (Bot_Manual(special) && li->backsector) {
+            if (Bot_UseDoor(li) && li->backsector) {
                 P_LineOpening(li);
                 if (openrange >= 56*FRACUNIT) {
                     /* An opened door that we already touched is unfinished
@@ -883,10 +1189,37 @@ static void Bot_Plan(player_t *p)
                generic exploration. Attempts are only a mild tie-breaker. */
             priority = special==11 ? -20000 : special==51 ? -15000 :
                        250 + (line_tries[i] > 4 ? 4 : line_tries[i]) * 250;
-            if (!Bot_Manual(special) && !Bot_IsExitSpecial(special) && line_used[i])
+
+            /* A reachable colored interaction is progression once its key is
+               owned. Do not make that depend entirely on having walked within
+               the memory radius before pickup: red bars first exposed by a red
+               door are a common counterexample. */
+            if (Bot_Key(special) >= 0) {
+                priority -= 9000;
+                if (line_key_memory && line_key_memory[i])
+                    priority -= 5000;
+            } else if (key_progress && key_target_line >= 0 && Bot_UseDoor(li)) {
+                /* The keyed object may be behind an ordinary door. Treat a
+                   reachable normal manual door as a possible gateway, with a
+                   strong preference for doors spatially close to the keyed
+                   target. This is intentionally a heuristic, not omniscient
+                   connectivity: the flood still proves that THIS door can be
+                   reached from the player's current side. */
+                fixed_t mx=li->v1->x + li->dx/2;
+                fixed_t my=li->v1->y + li->dy/2;
+                int gate_dist=P_AproxDistance(mx-key_target_x,my-key_target_y)/FRACUNIT;
+
+                priority -= 3500; /* any reachable manual frontier matters */
+                if (gate_dist < 768) {
+                    priority -= 7000;
+                    priority += gate_dist * 6;
+                }
+            }
+
+            if (!Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i])
                 priority += USED_SWITCH_SOFT_PENALTY;
             if (prefer_forward && special != 11 && special != 51) {
-                priority += 3000;   // во время commit сильно не любит другие двери/секретки
+                priority += 3000;   // РІРѕ РІСЂРµРјСЏ commit СЃРёР»СЊРЅРѕ РЅРµ Р»СЋР±РёС‚ РґСЂСѓРіРёРµ РґРІРµСЂРё/СЃРµРєСЂРµС‚РєРё
             }
             for (n = 1; n <= 3; ++n) {
                 fixed_t ax = li->v1->x + (fixed_t)((long long)li->dx*n/4);
@@ -905,6 +1238,19 @@ static void Bot_Plan(player_t *p)
         } else if (Bot_WalkSpecial(special) && li->backsector) {
             int side = P_PointOnLineSide(p->mo->x,p->mo->y,li) ? 1 : -1;
             priority = special==52 ? -20000 : special==124 ? -15000 : 800+line_tries[i]*1000;
+            if (Bot_Key(special) >= 0) {
+                priority -= 9000;
+                if (line_key_memory && line_key_memory[i])
+                    priority -= 5000;
+            } else if (key_progress && key_target_line >= 0) {
+                fixed_t mx=li->v1->x + li->dx/2;
+                fixed_t my=li->v1->y + li->dy/2;
+                int gate_dist=P_AproxDistance(mx-key_target_x,my-key_target_y)/FRACUNIT;
+                if (gate_dist < 768) {
+                    priority -= 4500;
+                    priority += gate_dist * 5;
+                }
+            }
             for (n = 1; n <= 3; ++n) {
                 fixed_t ax = li->v1->x+(fixed_t)((long long)li->dx*n/4);
                 fixed_t ay = li->v1->y+(fixed_t)((long long)li->dy*n/4);
@@ -930,12 +1276,17 @@ static void Bot_Plan(player_t *p)
                 forced_seen = true;
                 forced_item_until = leveltime + 2100;
             }
-            if (prefer_forward) {
-                // Во время commit почти полностью игнорируем предметы
-                // (кроме критического здоровья)
+            if ((leveltime < post_use_local_until || key_progress) && !forced_item_active) {
+                /* After a switch OR while finishing newly unlocked key
+                   progression, do not abandon the route for ordinary ammo,
+                   armor or routine health. Keys, major weapons and critical
+                   health may still interrupt. */
+                if (priority > -2400)
+                    continue;
+            } else if (prefer_forward) {
                 if (priority > -5000) priority += 2500;
             }
-            if (!Bot_Candidate(GO_ITEM, mo->x, mo->y, mo->x, mo->y, -1, priority)) {
+            if (!Bot_ItemCandidate(p, mo, priority)) {
                 /* Keys and other high-value items can live on islands that are
                    reachable only by carrying running momentum over a gap. */
                 if (priority <= -2400)
@@ -955,12 +1306,32 @@ static void Bot_Plan(player_t *p)
        This also crosses unmarked stairs and visits boss arenas. */
     for (i = 0; i < count; ++i) {
         int sec, score;
+        fixed_t from_switch;
         if (cells[i].stamp != stamp || cells[i].dist == INF || cells[i].dist < 96) continue;
         sec = R_PointInSubsector(Bot_X(i),Bot_Y(i))->sector-sectors;
+
+        from_switch = P_AproxDistance(Bot_X(i)-post_use_x, Bot_Y(i)-post_use_y);
+        if (leveltime < post_use_local_until) {
+            /* Stay in the interaction's neighborhood while a platform/door is
+               reacting.  384 units is large enough for a nearby lift/room, but
+               small enough to prevent a sudden trip back across the level. */
+            if (from_switch > 384*FRACUNIT) continue;
+        }
+
         score = 1800 + cells[i].dist + sector_visits[sec]*2000;
-        if (prefer_forward) {
-            /* After using an interaction, exploration must become LESS attractive.
-               The old -600 made the bot more willing to wander off. */
+        if (leveltime < post_use_local_until) {
+            score += from_switch / (4*FRACUNIT);
+            if (sec == post_use_sector) score -= 600;
+        } else if (key_progress && key_target_line >= 0) {
+            fixed_t to_key=P_AproxDistance(Bot_X(i)-key_target_x,
+                                           Bot_Y(i)-key_target_y);
+            /* Turn generic exploration into a frontier search toward the
+               inaccessible keyed interaction. Reachability is still guaranteed
+               by the flood; only the choice among reachable frontier cells is
+               biased toward the target. */
+            score += to_key / (2*FRACUNIT);
+            score -= 1800;
+        } else if (prefer_forward) {
             score += 2500;
         }
         if (score < goal.score) {
@@ -973,16 +1344,35 @@ static void Bot_Plan(player_t *p)
         for (i = 0; i < path_len/2; ++i) { n = path[i]; path[i] = path[path_len-1-i]; path[path_len-1-i] = n; }
         path_step = 0;
     }
-    next_plan = leveltime+350;
+    /* A failed/transient plan must not freeze the bot for ten seconds.  This
+       commonly happens just after an off-mesh landing while the flood is being
+       rebuilt around a moving platform / narrow stair entrance. */
+    if (goal.type == GO_NONE)
+        next_plan = leveltime + (forced_item_active ? 8 : 18);
+    else if (forced_item_active && goal.type != GO_ITEM)
+        next_plan = leveltime + 12;
+    else
+        next_plan = leveltime + 350;
+
     last_progress = leveltime; progress_dist = INF;
     I_Log("Bot: plan type=%d line=%d goal=(%d,%d) path=%d\n",goal.type,goal.line,goal.x/FRACUNIT,goal.y/FRACUNIT,path_len);
+    if (goal.line >= 0 && Bot_Key(lines[goal.line].special) >= 0)
+        I_Log("Bot: KEYED goal line=%d special=%d key=%d remembered=%d\n",
+              goal.line, lines[goal.line].special, Bot_Key(lines[goal.line].special),
+              line_key_memory ? line_key_memory[goal.line] : 0);
+    if (key_progress && key_target_line >= 0)
+        I_Log("Bot: key target line=%d special=%d at=(%d,%d) chosen_goal=%d line=%d\n",
+              key_target_line,lines[key_target_line].special,
+              key_target_x/FRACUNIT,key_target_y/FRACUNIT,
+              goal.type,goal.line);
 }
 
 void Bot_InitLevel(void)
 {
     long long total;
-    free(cells); free(heap); free(path); free(line_tries); free(line_retry); free(line_used); free(sector_visits); free(run_marks);
+    free(cells); free(heap); free(path); free(line_tries); free(line_retry); free(line_used); free(sector_visits); free(run_marks); free(line_key_memory);
     cells = NULL; heap = path = line_tries = line_retry = line_used = sector_visits = run_marks = NULL;
+    line_key_memory = NULL;
     orgx = (bmaporgx >> (FRACBITS+3)) * (GRID*FRACUNIT);
     orgy = (bmaporgy >> (FRACBITS+3)) * (GRID*FRACUNIT);
     width = bmapwidth*(128/GRID)+2; height = bmapheight*(128/GRID)+2; total = (long long)width*height;
@@ -992,10 +1382,16 @@ void Bot_InitLevel(void)
     cells = calloc(count,sizeof(*cells)); heap = malloc(count*sizeof(*heap)); path = malloc(count*sizeof(*path));
     line_tries = calloc(numlines,sizeof(int)); line_retry = calloc(numlines,sizeof(int)); line_used = calloc(numlines,sizeof(int)); sector_visits = calloc(numsectors,sizeof(int));
     run_marks = calloc(count,sizeof(*run_marks));
-    if (!cells || !heap || !path || !line_tries || !line_retry || !line_used || !sector_visits || !run_marks) I_Error("Bot: navigation allocation failed");
+    line_key_memory = calloc(numlines,sizeof(*line_key_memory));
+    if (!cells || !heap || !path || !line_tries || !line_retry || !line_used ||
+        !sector_visits || !run_marks || !line_key_memory)
+        I_Error("Bot: navigation allocation failed");
     stamp = 0; path_len = path_step = 0; goal.type = GO_NONE;
     next_plan = use_until = 0; last_sector = -1; last_keys = 0;
+    next_key_memory_scan = 0;
+    key_progress_mask = 0;
     stuck_since = last_progress = 0; last_x = last_y = 0;
+    next_ledge_diagnostic = 0;
     combat_target = ignored_target = NULL; combat_progress = ignore_until = 0;
     combat_has_shot = false; combat_seen_until = combat_commit_until = 0; combat_last_aim = 0;
     combat_last_x = combat_last_y = 0;
@@ -1008,6 +1404,9 @@ void Bot_InitLevel(void)
     ledge_anchor_x = ledge_anchor_y = 0; ledge_anchor_valid = false; ledge_recover_until = 0;
     commit_forward_until = 0;
     exit_commit_until = 0;
+    post_use_hold_until = post_use_local_until = 0;
+    post_use_line = -1; post_use_sector = -1;
+    post_use_x = post_use_y = post_use_look_x = post_use_look_y = 0;
     run_stamp = run_state = run_until = 0; failed_run_until = 0;
     run_sx = run_sy = run_tx = run_ty = run_start_z = 0;
     run_goal_x = run_goal_y = run_goal_z = 0;
@@ -1019,6 +1418,92 @@ void Bot_InitLevel(void)
     I_Log("Bot: collision grid %dx%d\n",width,height);
 }
 void Bot_Init(void) { bot_active = false; }
+
+/* Overestimate barrel chains: any barrel in blast range may join the chain,
+   even if a wall or its current health would actually prevent detonation.
+   Explosion distance intentionally ignores Z, matching P_RadiusAttack. */
+static mobj_t *Bot_BarrelTarget(player_t *p)
+{
+    mobj_t *barrels[128];
+    thinker_t *th;
+    int count=0, root, i, j;
+    ammotype_t ammo=weaponinfo[p->readyweapon].ammo;
+    int needed=p->readyweapon==wp_bfg ? 40 : p->readyweapon==wp_supershotgun ? 2 : 1;
+    if (ammo==am_noammo || p->ammo[ammo]<needed || p->pendingweapon!=wp_nochange) return NULL;
+    for (th=thinkercap.next; th!=&thinkercap; th=th->next) {
+        mobj_t *m;
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+        m=(mobj_t*)th;
+        if (m->type!=MT_BARREL || !(m->flags & MF_SHOOTABLE) || m->health<=0) continue;
+        if (count == 128) return NULL; /* Never truncate a safety calculation. */
+        barrels[count++]=m;
+    }
+    for (root=0; root<count; ++root) {
+        boolean chain[128]={false}, changed=true, safe=true, useful=false;
+        fixed_t distance=P_AproxDistance(barrels[root]->x-p->mo->x,barrels[root]->y-p->mo->y);
+        if (distance>480*FRACUNIT) continue;
+        P_AimLineAttack(p->mo,R_PointToAngle2(p->mo->x,p->mo->y,
+                        barrels[root]->x,barrels[root]->y),distance+32*FRACUNIT);
+        if (linetarget!=barrels[root]) continue;
+        chain[root]=true;
+        /* Include every barrel the current weapon could hit, not just the
+           aimed barrel. Use a conservative horizontal cone with body margin;
+           no sight filter, since missed pellets can travel behind the target. */
+        {
+            double dx=(double)barrels[root]->x-p->mo->x;
+            double dy=(double)barrels[root]->y-p->mo->y;
+            double len=sqrt(dx*dx+dy*dy);
+            double spread=p->readyweapon==wp_bfg ? 1.1 :
+                          p->readyweapon==wp_supershotgun ? 0.23 : 0.08;
+            if (len<FRACUNIT) continue;
+            for (i=0; i<count; ++i) {
+                double bx=(double)barrels[i]->x-p->mo->x;
+                double by=(double)barrels[i]->y-p->mo->y;
+                double along=(bx*dx+by*dy)/len;
+                double across=fabs(bx*dy-by*dx)/len;
+                if (along>=0.0 && along<=MISSILERANGE &&
+                    across<=along*spread+barrels[i]->radius+32*FRACUNIT)
+                    chain[i]=true;
+                /* Projectile splash can ignite neighbors of the impact too. */
+                if (p->readyweapon==wp_missile || p->readyweapon==wp_bfg) {
+                    fixed_t sx=abs(barrels[i]->x-barrels[root]->x);
+                    fixed_t sy=abs(barrels[i]->y-barrels[root]->y);
+                    if ((sx>sy ? sx:sy)<160*FRACUNIT+barrels[i]->radius) chain[i]=true;
+                }
+            }
+        }
+        while (changed) {
+            changed=false;
+            for (i=0; i<count; ++i) if (chain[i]) {
+                fixed_t dx=abs(barrels[i]->x-p->mo->x), dy=abs(barrels[i]->y-p->mo->y);
+                /* Extra margin for movement while the explosion animates. */
+                if ((dx>dy ? dx:dy) < 192*FRACUNIT+p->mo->radius) safe=false;
+                for (j=0; j<count; ++j) if (!chain[j]) {
+                    dx=abs(barrels[i]->x-barrels[j]->x); dy=abs(barrels[i]->y-barrels[j]->y);
+                    if ((dx>dy ? dx:dy) < 128*FRACUNIT+barrels[j]->radius) {
+                        chain[j]=true; changed=true;
+                    }
+                }
+            }
+        }
+        if (!safe) continue;
+        for (th=thinkercap.next; th!=&thinkercap && !useful; th=th->next) {
+            mobj_t *m;
+            if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+            m=(mobj_t*)th;
+            if (!(m->flags & MF_SHOOTABLE) || m->health<=0 || m->player ||
+                m->type==MT_BARREL || m->type==MT_CYBORG || m->type==MT_SPIDER) continue;
+            for (i=0; i<count; ++i) if (chain[i]) {
+                fixed_t dx=abs(m->x-barrels[i]->x), dy=abs(m->y-barrels[i]->y);
+                if ((dx>dy ? dx:dy) < 112*FRACUNIT+m->radius && P_CheckSight(m,barrels[i])) {
+                    useful=true; break;
+                }
+            }
+        }
+        if (useful) return barrels[root];
+    }
+    return NULL;
+}
 
 static mobj_t *Bot_Threat(player_t *p)
 {
@@ -1071,6 +1556,15 @@ static mobj_t *Bot_Threat(player_t *p)
         }
     }
 
+    /* A safe explosion can take precedence over a distant monster. Keep
+       defending against enemies already in melee range. Recheck every tic. */
+    if (!best || bestdist > 96*FRACUNIT) {
+        mobj_t *barrel=Bot_BarrelTarget(p);
+        if (barrel) {
+            best=barrel;
+            bestdist=P_AproxDistance(best->x-p->mo->x,best->y-p->mo->y);
+        }
+    }
     if (best) {
         if (best != combat_target) {
             combat_target = best;
@@ -1161,50 +1655,69 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
 {
     thinker_t *th;
     int risk=0, dangers=0;
+    double pathx[23], pathy[23];
+    double vx=(double)mo->momx/FRACUNIT, vy=(double)mo->momy/FRACUNIT;
+    int step;
+
+    /* Predict travel to the candidate instead of teleporting there. Match the
+       movement controller's speed, acceleration limit and ground friction. */
+    pathx[0]=(double)mo->x/FRACUNIT;
+    pathy[0]=(double)mo->y/FRACUNIT;
+    for (step=1; step<=22; ++step) {
+        double dx=(double)px/FRACUNIT-pathx[step-1];
+        double dy=(double)py/FRACUNIT-pathy[step-1];
+        double len=sqrt(dx*dx+dy*dy), speed=fmin(7.0,len*0.35);
+        double ax=(len>0.0 ? dx/len*speed : 0.0)-vx;
+        double ay=(len>0.0 ? dy/len*speed : 0.0)-vy;
+        double limit=mo->z<=mo->floorz ? 1.5625 : 0.390625;
+        vx+=fmax(-limit,fmin(limit,ax));
+        vy+=fmax(-limit,fmin(limit,ay));
+        pathx[step]=pathx[step-1]+vx;
+        pathy[step]=pathy[step-1]+vy;
+        if (mo->z<=mo->floorz) { vx*=0.90625; vy*=0.90625; }
+    }
 
     for (th=thinkercap.next; th!=&thinkercap; th=th->next) {
         mobj_t *m;
         double rx,ry,vx,vy,v2,t,cx,cy,clear,hit,margin;
         double mz,pz0,pz1;
+        int local=0;
 
         if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
         m=(mobj_t*)th;
         if (!(m->flags & MF_MISSILE) || m==mo || m->target==mo) continue;
 
-        rx=(double)(m->x-px)/FRACUNIT;
-        ry=(double)(m->y-py)/FRACUNIT;
+        rx=(double)(m->x-mo->x)/FRACUNIT;
+        ry=(double)(m->y-mo->y)/FRACUNIT;
         if (rx*rx+ry*ry > 576.0*576.0) continue;
-
-        /* Candidate movement is a short burst; assume the bot will mostly have
-           reached the point during the dangerous part of the projectile path.
-           Using missile velocity alone is more stable than feeding current
-           player momentum into every candidate score. */
-        vx=(double)m->momx/FRACUNIT;
-        vy=(double)m->momy/FRACUNIT;
-        v2=vx*vx+vy*vy;
-        if (v2<0.01) continue;
-
-        t=-(rx*vx+ry*vy)/v2;
-        if (t<0.0 || t>22.0) continue;
-        cx=rx+vx*t; cy=ry+vy*t;
-        clear=sqrt(cx*cx+cy*cy);
         hit=(double)(mo->radius+m->radius)/FRACUNIT+8.0;
+        for (step=0; step<22; ++step) {
+            double fraction;
+            int sample;
+            rx=(double)m->x/FRACUNIT+(double)m->momx/FRACUNIT*step-pathx[step];
+            ry=(double)m->y/FRACUNIT+(double)m->momy/FRACUNIT*step-pathy[step];
+            vx=(double)m->momx/FRACUNIT-(pathx[step+1]-pathx[step]);
+            vy=(double)m->momy/FRACUNIT-(pathy[step+1]-pathy[step]);
+            v2=vx*vx+vy*vy;
+            fraction=v2>0.01 ? fmax(0.0,fmin(1.0,-(rx*vx+ry*vy)/v2)) : 0.0;
+            t=step+fraction;
+            cx=rx+vx*fraction; cy=ry+vy*fraction;
+            clear=fmax(fabs(cx),fabs(cy)); /* Doom uses square XY collision boxes. */
+            mz=(double)m->z+(double)m->momz*t;
+            pz0=(double)mo->z;
+            pz1=(double)(mo->z+mo->height);
+            if (mz > pz1+8*FRACUNIT || mz+m->height < pz0-8*FRACUNIT) continue;
 
-        mz=(double)m->z+(double)m->momz*t;
-        pz0=(double)mo->z;
-        pz1=(double)(mo->z+mo->height);
-        if (mz > pz1+8*FRACUNIT || mz+m->height < pz0-8*FRACUNIT) continue;
-
-        margin=clear-hit;
-        if (margin<48.0) {
-            int local;
-            ++dangers;
-            if (margin<=0.0)
-                local=120000+(int)((22.0-t)*2200.0);
-            else
-                local=(int)((48.0-margin)*900.0+(22.0-t)*160.0);
-            if (local>0 && risk<INT_MAX-local) risk+=local;
+            margin=clear-hit;
+            if (margin<48.0) {
+                if (margin<=0.0)
+                    sample=120000+(int)((22.0-t)*2200.0);
+                else
+                    sample=(int)((48.0-margin)*900.0+(22.0-t)*160.0);
+                if (sample>local) local=sample;
+            }
         }
+        if (local>0) { ++dangers; if (risk<INT_MAX-local) risk+=local; }
     }
 
     if (danger_count) *danger_count=dangers;
@@ -1214,16 +1727,17 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
 /* Multi-projectile tactical dodge.  The result is a FIXED short destination,
    not a point 72 units away from the bot's new position every tic.  A combat
    leash and a brief pause between bursts keep dodging inside the current room. */
-static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t *outx, fixed_t *outy)
+static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
+                                   fixed_t *outx, fixed_t *outy)
 {
-    static const int radii[] = { 28, 36 };
+    static const int radii[] = { 28, 44, 60 };
     int current_risk, dangers, bestscore=INT_MAX;
     fixed_t anchorx, anchory, bestx=0, besty=0;
     int r,k;
 
     if (!mo || !outx || !outy) return false;
 
-    current_risk=Bot_MissileRiskAt(mo,mo->x,mo->y,&dangers);
+    current_risk=Bot_MissileRiskAt(mo,navx,navy,&dangers);
     if (!dangers || current_risk<=0) {
         missile_dodge_until=0;
         return false;
@@ -1233,7 +1747,8 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t *outx, fixed_t *outy)
        key difference from v8's endless drifting strafe. */
     if (leveltime < missile_dodge_until &&
         P_AproxDistance(mo->x-missile_dodge_tx,mo->y-missile_dodge_ty) > 5*FRACUNIT &&
-        Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,missile_dodge_tx,missile_dodge_ty,mo,true)) {
+        Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,missile_dodge_tx,missile_dodge_ty,mo,true) &&
+        Bot_MissileRiskAt(mo,missile_dodge_tx,missile_dodge_ty,NULL) < current_risk) {
         *outx=missile_dodge_tx; *outy=missile_dodge_ty;
         return true;
     }
@@ -1254,7 +1769,7 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t *outx, fixed_t *outy)
 
     /* A tiny recovery pause prevents left/right machine-gun oscillation.  Very
        high immediate risk is allowed to break the pause. */
-    if (leveltime < missile_dodge_pause_until && current_risk < 150000)
+    if (leveltime < missile_dodge_pause_until && current_risk < 120000)
         return false;
 
     for (r=0; r<(int)(sizeof(radii)/sizeof(radii[0])); ++r) {
@@ -1290,7 +1805,7 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t *outx, fixed_t *outy)
     /* Do not move just because a technically different point exists.  It must
        materially improve the predicted missile situation, unless the current
        point is an actual impact course. */
-    if (bestscore >= current_risk + 2000 && current_risk < 120000)
+    if (bestscore >= current_risk)
         return false;
 
     missile_dodge_tx=bestx; missile_dodge_ty=besty;
@@ -1388,6 +1903,53 @@ static boolean Bot_LedgeCommandSafe(mobj_t *mo, const ticcmd_t *cmd)
         Bot_MoveEx(&next,&predicted,x,y,true,0.0);
     }
     return true;
+}
+
+/* Produce the fastest ledge-safe command instead of oscillating between
+   "too fast" and a complete stop.  This lets precision traversal stay brisk on
+   straight stairs while retaining the exact same safety predictor near the pit. */
+static void Bot_LedgeMoveAdaptive(ticcmd_t *cmd, mobj_t *mo,
+                                  fixed_t tx, fixed_t ty,
+                                  boolean stop, double requested_speed)
+{
+    static const double caps[] = { 3.2, 2.4, 1.8, 1.35, 1.0, 0.70, 0.45 };
+    ticcmd_t base, test;
+    int i;
+
+    if (!cmd || !mo) return;
+
+    base=*cmd;
+
+    if (stop) {
+        Bot_MoveEx(cmd,mo,mo->x,mo->y,true,0.0);
+        return;
+    }
+
+    /* Try the requested speed first. */
+    test=base;
+    Bot_MoveEx(&test,mo,tx,ty,false,requested_speed);
+    if (Bot_LedgeCommandSafe(mo,&test)) {
+        *cmd=test;
+        return;
+    }
+
+    /* Then progressively reduce only the translational speed. */
+    for (i=0; i<(int)(sizeof(caps)/sizeof(caps[0])); ++i) {
+        double cap=caps[i];
+
+        if (cap >= requested_speed-0.001) continue;
+
+        test=base;
+        Bot_MoveEx(&test,mo,tx,ty,false,cap);
+        if (Bot_LedgeCommandSafe(mo,&test)) {
+            *cmd=test;
+            return;
+        }
+    }
+
+    /* No forward command is currently safe: brake in place. */
+    *cmd=base;
+    Bot_MoveEx(cmd,mo,mo->x,mo->y,true,0.0);
 }
 
 static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
@@ -1507,6 +2069,36 @@ static boolean Bot_FindDoorCrossPoint(mobj_t *mo, int line_index, boolean actors
             return true;
         }
     }
+    /* A diagonal from a quarter-point approach can clip a door jamb even
+       after the door is fully open. First align with the middle of the
+       opening on the entry side, then cross on the next tic. */
+    P_LineOpening(li);
+    if (openrange >= mo->height) {
+        fixed_t mx=li->v1->x+li->dx/2, my=li->v1->y+li->dy/2;
+        fixed_t sx=mx+(fixed_t)(nx*24*FRACUNIT);
+        fixed_t sy=my+(fixed_t)(ny*24*FRACUNIT);
+        fixed_t sf;
+        if (P_PointOnLineSide(sx,sy,li) != door_commit_side) {
+            sx=mx-(fixed_t)(nx*24*FRACUNIT);
+            sy=my-(fixed_t)(ny*24*FRACUNIT);
+        }
+        if (P_PointOnLineSide(mo->x,mo->y,li) == door_commit_side &&
+            Bot_Position(sx,sy,mo,actors,&sf) &&
+            Bot_Walk(mo->x,mo->y,mo->z,sx,sy,mo,actors)) {
+            for (a=0; a<(int)(sizeof(across)/sizeof(across[0])); ++a) {
+                fixed_t px=mx+(fixed_t)(nx*across[a]*FRACUNIT);
+                fixed_t py=my+(fixed_t)(ny*across[a]*FRACUNIT);
+                if (P_PointOnLineSide(px,py,li) == door_commit_side) {
+                    px=mx-(fixed_t)(nx*across[a]*FRACUNIT);
+                    py=my-(fixed_t)(ny*across[a]*FRACUNIT);
+                }
+                if (!Bot_Walk(sx,sy,sf,px,py,mo,actors)) continue;
+                if (outx) *outx=sx;
+                if (outy) *outy=sy;
+                return true;
+            }
+        }
+    }
     return false;
 }
 
@@ -1560,6 +2152,49 @@ static boolean Bot_PathTurnsAt(int step)
     return ax != bx || ay != by;
 }
 
+/* Precision path edges are cardinal, but steering to the exact next grid point
+   can still be diagonal when the player is a unit or two off the lane.  On a
+   narrow staircase that tiny diagonal is enough to leak momentum toward the
+   hole.  First recenter on the edge's lane, then advance along it. */
+static void Bot_LedgeRailTarget(mobj_t *mo, int from_cell, int to_cell,
+                                fixed_t desired_x, fixed_t desired_y,
+                                fixed_t *tx, fixed_t *ty, double *maxspeed)
+{
+    int dx, dy;
+    const fixed_t eps = 2*FRACUNIT;
+
+    if (!mo || !tx || !ty || !maxspeed ||
+        from_cell < 0 || from_cell >= count || to_cell < 0 || to_cell >= count) {
+        if (tx) *tx=desired_x;
+        if (ty) *ty=desired_y;
+        return;
+    }
+
+    dx = (to_cell%width) - (from_cell%width);
+    dy = (to_cell/width) - (from_cell/width);
+    *tx=desired_x; *ty=desired_y;
+
+    if (dx && !dy) {
+        fixed_t lane=Bot_Y(to_cell);
+        if (abs(mo->y-lane) > eps) {
+            /* Recenter without making progress along X. */
+            *tx=mo->x; *ty=lane;
+            if (*maxspeed > 1.80) *maxspeed=1.80;
+        } else {
+            *ty=lane;
+        }
+    } else if (dy && !dx) {
+        fixed_t lane=Bot_X(to_cell);
+        if (abs(mo->x-lane) > eps) {
+            /* Recenter without making progress along Y. */
+            *tx=lane; *ty=mo->y;
+            if (*maxspeed > 1.80) *maxspeed=1.80;
+        } else {
+            *tx=lane;
+        }
+    }
+}
+
 void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 {
     mobj_t *mo, *threat;
@@ -1574,7 +2209,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     boolean door_cross = false;
     boolean door_waiting = false;
     boolean ledge_protect = false;
-    double ledge_speed = 2.4;
+    double ledge_speed = 4.2;
     memset(cmd,0,sizeof(*cmd));
     if (!p || !(mo=p->mo) || !usergame || gamestate != GS_LEVEL) return;
     if (p->playerstate == PST_DEAD) { if ((leveltime%35)==0) cmd->buttons = BT_USE; return; }
@@ -1584,9 +2219,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     Bot_CheckPendingUse();
 
     if (door_commit_line >= 0 && leveltime < door_commit_until) {
-        if (P_PointOnLineSide(mo->x,mo->y,&lines[door_commit_line]) != door_commit_side ||
-            P_AproxDistance(mo->x-door_tx,mo->y-door_ty) < 16*FRACUNIT) {
+        if (P_PointOnLineSide(mo->x,mo->y,&lines[door_commit_line]) != door_commit_side &&
+            P_AproxDistance(mo->x-door_tx,mo->y-door_ty) < 4*FRACUNIT) {
             I_Log("Bot: crossed door line=%d\n",door_commit_line);
+            if (line_key_memory && door_commit_line >= 0 && door_commit_line < numlines)
+                line_key_memory[door_commit_line]=0;
+            if (door_commit_line >= 0 && door_commit_line < numlines)
+                Bot_ClearKeyProgressForSpecial(lines[door_commit_line].special);
             Bot_ClearDoorCommit();
             next_plan = 0;
         }
@@ -1596,14 +2235,44 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
     sec = mo->subsector->sector-sectors;
     if (sec != last_sector) { ++sector_visits[sec]; last_sector = sec; }
+
+    Bot_RememberNearbyLockedLines(p);
+
     for (i=0;i<3;++i) if (Bot_HasKey(p,i)) keys |= 1<<i;
-    if (keys != last_keys) { next_plan = 0; last_keys = keys; }
+    if (keys != last_keys) {
+        int gained = keys & ~last_keys;
+        int li;
+
+        /* A newly acquired key should immediately resurrect any matching
+           interaction we encountered earlier, even if that line happened to be
+           under a retry cooldown from some previous navigation attempt. */
+        if (gained) {
+            key_progress_mask |= gained;
+
+            if (line_key_memory) {
+                for (li=0; li<numlines; ++li) {
+                    int key=Bot_Key(lines[li].special);
+                    if (key >= 0 && (gained & (1<<key)) && line_key_memory[li]) {
+                        line_retry[li]=0;
+                        I_Log("Bot: key acquired, recall line=%d key=%d\n",li,key);
+                    }
+                }
+            }
+
+            I_Log("Bot: key progression start mask=%d\n",key_progress_mask);
+        }
+
+        next_plan = 0;
+        last_keys = keys;
+    }
     if (P_AproxDistance(mo->x-last_x,mo->y-last_y) > 96*FRACUNIT) next_plan = 0;
     last_x = mo->x; last_y = mo->y;
-    if (leveltime >= next_plan) Bot_Plan(p);
+    /* Finish the already selected door crossing before doing another flood
+       and off-mesh search. Replanning here can pause an otherwise open door. */
+    if (leveltime >= next_plan && door_commit_line < 0) Bot_Plan(p);
     ledge_protect = (forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
-                     P_AproxDistance(goal.x-forced_item_x,goal.y-forced_item_y) < 64*FRACUNIT);
+                     P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
 
     if (!ledge_protect) {
         ledge_anchor_valid=false;
@@ -1640,25 +2309,39 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 fixed_t wpdist = P_AproxDistance(mo->x-Bot_X(path[path_step]),
                                                  mo->y-Bot_Y(path[path_step]));
                 fixed_t speednow = P_AproxDistance(mo->momx,mo->momy);
-                boolean checkpoint = Bot_PathTurnsAt(path_step);
-                if (path_step>0 && cells[path[path_step]].floor != cells[path[path_step-1]].floor)
-                    checkpoint=true;
-                if (path_step+1<path_len && cells[path[path_step]].floor != cells[path[path_step+1]].floor)
-                    checkpoint=true;
+                /* Only real XY turns and the final checkpoint require a full
+                   stop. Straight stair risers are handled by the rail controller
+                   and command-safety predictor; stopping at every height change
+                   made an ordinary staircase crawl. */
+                boolean checkpoint = Bot_PathTurnsAt(path_step) || path_step == path_len-1;
                 if (wpdist >= 2*FRACUNIT) break;
                 /* Turns AND stair-height transitions are stop-and-go control
                    points.  A straight-looking riser can still carry lateral
                    momentum toward MAP02's central hole. */
                 if (checkpoint && speednow > FRACUNIT/3) break;
+                /* Arrival tolerance must not skip a corner while the next
+                   edge still cuts the pit from the player's real position.
+                   Keep approaching this checkpoint until that edge is safe. */
+                if (path_step+1 < path_len &&
+                    !Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,
+                                      Bot_X(path[path_step+1]),Bot_Y(path[path_step+1]),mo,true))
+                    break;
                 ++path_step;
+                progress_dist = INF;
             }
         } else {
             while (path_step < path_len &&
                    P_AproxDistance(mo->x-Bot_X(path[path_step]),mo->y-Bot_Y(path[path_step])) < 3*FRACUNIT)
                 ++path_step;
         }
-        tx = goal.x; ty = goal.y;
-        probe_radius = PLAYERRADIUS+2*FRACUNIT;
+        /* GO_ITEM stores the reachable pickup checkpoint in x/y; the actual
+           item origin lives in aimx/aimy.  Other goals already use x/y as their
+           movement destination as well. */
+        tx = goal.x;
+        ty = goal.y;
+        /* Precision edges were validated with BOT_RADIUS. Inflating it here
+           can reject the very corridor selected by the flood near a wall. */
+        probe_radius = ledge_protect ? BOT_RADIUS : PLAYERRADIUS+2*FRACUNIT;
         {
             boolean stable_goal = goal.cell >= 0 && goal.cell < count &&
                                   cells[goal.cell].floor >= mo->z-24*FRACUNIT;
@@ -1678,35 +2361,40 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     ty = Bot_Y(path[path_step]);
                     wpdist = P_AproxDistance(tx-mo->x,ty-mo->y);
                     speednow = P_AproxDistance(mo->momx,mo->momy);
-                    corner = Bot_PathTurnsAt(path_step);
-                    if (path_step>0 && cells[path[path_step]].floor != cells[path[path_step-1]].floor)
-                        corner=true;
-                    if (path_step+1<path_len && cells[path[path_step]].floor != cells[path[path_step+1]].floor)
-                        corner=true;
+                    corner = Bot_PathTurnsAt(path_step) || path_step == path_len-1;
 
                     /* Brake before every geometric turn OR stair transition.
                        The latter matters on MAP02 because the dangerous hole is
                        beside a staircase even where the grid direction itself
                        remains straight. */
                     if (corner && wpdist < 8*FRACUNIT) {
-                        if (speednow > FRACUNIT/3) {
+                        if (speednow > FRACUNIT/2) {
                             stop = true;
                         } else {
-                            ledge_speed = 1.0;
+                            ledge_speed = 2.2;
                         }
+                    }
+
+                    /* Even a cardinal graph edge becomes a diagonal command if
+                       the player arrived a little off-centre.  Rail the command
+                       back onto this edge before allowing forward progress. */
+                    if (!stop && path_step > 0) {
+                        /* The initial connector was checked from the real
+                           position by Bot_NearLedgeStart. It is not the next
+                           grid edge in reverse: railing it can replace a safe
+                           diagonal connector with a blocked cardinal move. */
+                        Bot_LedgeRailTarget(mo,path[path_step-1],path[path_step],tx,ty,
+                                            &tx,&ty,&ledge_speed);
                     }
                 } else {
-                    /* Critical v8 change: never switch from the final safe grid
-                       cell to the raw item coordinates.  That last diagonal was
-                       bypassing all the careful cardinal stair routing. */
-                    if (!Bot_FindSafeItemApproach(mo,goal.x,goal.y,goal.cell,&tx,&ty)) {
-                        if (goal.cell >= 0 && goal.cell < count) {
-                            tx=Bot_X(goal.cell); ty=Bot_Y(goal.cell);
-                        } else {
-                            tx=mo->x; ty=mo->y; stop=true;
-                        }
-                    }
-                    ledge_speed = 1.0;
+                    /* Bot_ItemCandidate already chose goal.cell inside the
+                       item's pickup envelope.  Do NOT invent one more approach
+                       vector here.  Reaching the final grid checkpoint is enough
+                       to collect the item and, more importantly, cannot recreate
+                       the diagonal shortcut across MAP02's stairwell. */
+                    tx = goal.x;
+                    ty = goal.y;
+                    ledge_speed = 2.0;
                 }
                 /* Keep the controller target equal to the arrival checkpoint.
                    Shifting it every tic left the original cell unreached and
@@ -1714,16 +2402,27 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
                 if (!stop && !Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,tx,ty,mo,true)) {
                     stop = true;
-                    next_plan = leveltime + 1;
+                    if (leveltime >= next_ledge_diagnostic) {
+                        boolean geometry_ok = Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,tx,ty,mo,false);
+                        I_Log("Bot: ledge blocked pos=(%d,%d,%d) target=(%d,%d) path=%d/%d geometry=%d\n",
+                              mo->x/FRACUNIT,mo->y/FRACUNIT,mo->z/FRACUNIT,
+                              tx/FRACUNIT,ty/FRACUNIT,path_step,path_len,geometry_ok);
+                        next_ledge_diagnostic = leveltime+TICRATE;
+                    }
+                    /* Schedule once; never push a pending retry farther away.
+                       Extending it whenever it was two tics away prevented
+                       Bot_Plan from ever running during a persistent stop. */
+                    if (next_plan > leveltime + 8)
+                        next_plan = leveltime + 8;
                 }
 
                 /* Slow down based on actual free floor around the player's
                    centre, not just whether the route is technically legal. */
                 {
                     int clearance=Bot_DropClearance(mo->x,mo->y);
-                    if (clearance<=12 && ledge_speed>0.55) ledge_speed=0.55;
-                    else if (clearance<=20 && ledge_speed>0.85) ledge_speed=0.85;
-                    else if (clearance<=28 && ledge_speed>1.25) ledge_speed=1.25;
+                    if (clearance<=12 && ledge_speed>1.50) ledge_speed=1.50;
+                    else if (clearance<=20 && ledge_speed>2.40) ledge_speed=2.40;
+                    else if (clearance<=28 && ledge_speed>3.20) ledge_speed=3.20;
                 }
 
                 /* If projected momentum is heading toward a tall drop, enter a
@@ -1744,7 +2443,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     } else if (Bot_WalkStable(mo->x,mo->y,mo->z,
                                               ledge_anchor_x,ledge_anchor_y,mo,true)) {
                         tx=ledge_anchor_x; ty=ledge_anchor_y;
-                        stop=false; ledge_speed=0.70;
+                        stop=false; ledge_speed=1.50;
                     } else {
                         stop=true;
                     }
@@ -1819,7 +2518,15 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 interaction_lock = interaction_lock || ready_to_use || linedist < 88*FRACUNIT;
         } else if (goal.type == GO_RUN && dist < 7*FRACUNIT) {
             tx=goal.aimx; ty=goal.aimy; stop=true; ready_to_run=true;
-        } else if (dist < 12*FRACUNIT && goal.type != GO_USE && goal.type != GO_RUN) {
+        } else if (goal.type == GO_ITEM && dist < 2*FRACUNIT) {
+            /* The item checkpoint has a 4-unit pickup margin.  Once we are
+               within 2 units of it, stop for this tic and immediately replan.
+               If the pickup was collected it disappears from the next plan;
+               if not, the next plan continues instead of idling for 350 tics. */
+            next_plan=leveltime+1;
+            stop=true;
+        } else if (dist < 12*FRACUNIT && goal.type != GO_USE &&
+                   goal.type != GO_RUN && goal.type != GO_ITEM) {
             if (goal.line>=0) { ++line_tries[goal.line]; line_retry[goal.line]=leveltime+350; }
             if (goal.type == GO_EXPLORE) ++sector_visits[R_PointInSubsector(goal.x,goal.y)->sector-sectors];
             next_plan=leveltime+1; stop=true;
@@ -1833,12 +2540,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean geometry_open;
         boolean actor_open;
         fixed_t crossx=door_tx, crossy=door_ty;
-        probe_radius = PLAYERRADIUS+2*FRACUNIT;
+        probe_radius = BOT_RADIUS;
 
         /* Once the sector opens, find a reachable point just across this
            particular doorway instead of insisting on one fixed deep target. */
         geometry_open = Bot_FindDoorCrossPoint(mo,door_commit_line,false,&crossx,&crossy);
-        actor_open = geometry_open && Bot_Walk(mo->x,mo->y,mo->z,crossx,crossy,mo,true);
+        actor_open = geometry_open &&
+            Bot_FindDoorCrossPoint(mo,door_commit_line,true,&crossx,&crossy);
         if (geometry_open) {
             door_tx=crossx; door_ty=crossy;
         }
@@ -1857,6 +2565,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             interaction_lock = false;
         }
         probe_radius = BOT_RADIUS;
+    }
+
+    if (leveltime < post_use_hold_until &&
+        door_commit_line < 0 && !ledge_protect && !ready_to_run) {
+        tx = post_use_look_x;
+        ty = post_use_look_y;
+        stop = true;
     }
 
     aim = R_PointToAngle2(mo->x, mo->y, tx, ty);
@@ -1892,7 +2607,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
            azimuth steal the first-person view; move out from underneath first. */
         if (!(dz > 40*FRACUNIT && d < 96*FRACUNIT)) {
             aim = combat_last_aim;
-            Bot_Weapon(cmd, p, d);
+            /* Barrel safety was checked for the current weapon. Keep it;
+               switching here would invalidate its spread/blast calculation. */
+            if (threat->type != MT_BARREL) Bot_Weapon(cmd, p, d);
         } else {
             prefer_combat = false;
         }
@@ -1901,7 +2618,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
            where this engagement began.  v8 rebuilt a 48-unit side target from
            the NEW player position every tic, which effectively meant "keep
            walking sideways forever" and could carry the bot into another room. */
-        if (prefer_combat && !ledge_protect && d < 350*FRACUNIT && d > 96*FRACUNIT && dz < 40*FRACUNIT) {
+        if (prefer_combat && !ledge_protect && threat->type != MT_BARREL &&
+            d < 350*FRACUNIT && d > 96*FRACUNIT && dz < 40*FRACUNIT) {
             fixed_t burst_dist;
 
             if (!combat_anchor_valid) {
@@ -1989,7 +2707,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (!ledge_protect && !ready_to_run && !interaction_lock && !door_cross && !door_waiting &&
         leveltime >= exit_commit_until) {
         fixed_t dodgex, dodgey;
-        if (Bot_ProjectileDodge(mo,&dodgex,&dodgey)) {
+        if (Bot_ProjectileDodge(mo,stop ? mo->x : tx,stop ? mo->y : ty,&dodgex,&dodgey)) {
             tx=dodgex; ty=dodgey; stop=false;
         }
     }
@@ -2028,7 +2746,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        hit the intended linedef. The old code traced along the desired angle
        while the real player was still turning, so recessed MAP01-style buttons
        often consumed a try without ever receiving P_UseLines. */
-    if (goal.type == GO_USE && ready_to_use && leveltime >= use_until &&
+    if (goal.type == GO_USE && ready_to_use && door_commit_line < 0 && leveltime >= use_until &&
         abs(turn) < 650) {
         angle_t useangle = mo->angle + (angle_t)((int)cmd->angleturn * 65536);
         if (Bot_CanUse(mo,useangle,&lines[goal.line])) {
@@ -2038,7 +2756,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
         int sp = lines[goal.line].special;
 
-        // После любого использования свитча/двери — временно запрещаем возврат
+        // РџРѕСЃР»Рµ Р»СЋР±РѕРіРѕ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ СЃРІРёС‚С‡Р°/РґРІРµСЂРё вЂ” РІСЂРµРјРµРЅРЅРѕ Р·Р°РїСЂРµС‰Р°РµРј РІРѕР·РІСЂР°С‚
         commit_forward_until = leveltime + 110;
 
         if (sp == 11 || sp == 51) {
@@ -2053,7 +2771,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             exit_commit_until = leveltime + 70;
             stop = true;
         }
-        else if (Bot_Manual(sp)) {
+        else if (Bot_UseDoor(&lines[goal.line])) {
             /* Press -> cross is one atomic navigation action.  Do not allow an
                ammo pickup behind us to replace the second half while the door
                is opening. */
@@ -2062,16 +2780,26 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             next_plan = leveltime + 24;
             use_until = leveltime + 35;
         } else {
+            /* Remote switch/platform interaction: briefly stay and watch it,
+               then keep decisions local instead of instantly backtracking for
+               old ammo in another room. */
+            post_use_line = goal.line;
+            post_use_sector = mo->subsector->sector-sectors;
+            post_use_x = mo->x; post_use_y = mo->y;
+            post_use_look_x = goal.aimx; post_use_look_y = goal.aimy;
+            post_use_hold_until = leveltime + 18;   /* ~0.5 s */
+            post_use_local_until = leveltime + 140; /* ~4 s */
+            commit_forward_until = post_use_local_until;
+
             /* Remember the attempted remote switch, but only mark it as used
                after the next tics prove that its special changed or a tagged
-               sector thinker started.  This prevents both missed-click
-               blacklisting and endless revisits to repeatable platform switches. */
+               sector thinker started. */
             pending_use_line = goal.line;
             pending_use_special = sp;
             pending_use_until = leveltime + 4;
             line_retry[goal.line] = leveltime + 18;
             next_plan = leveltime + 8;
-            stop = false;
+            stop = true;
             goal.type = GO_NONE;
             use_until = leveltime + 14;
         }
@@ -2079,7 +2807,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         I_Log("Bot: use line=%d special=%d\n", goal.line, sp);
         }
     }
-    else if (threat && prefer_combat && abs(turn) < 900) {
+    else if (threat && prefer_combat && abs(turn) < 900 &&
+             (threat->type != MT_BARREL || p->pendingweapon == wp_nochange)) {
         angle_t shot = mo->angle + (angle_t)((int)cmd->angleturn * 65536);
         P_AimLineAttack(mo, shot, MISSILERANGE);
         if (linetarget == threat) {
@@ -2097,8 +2826,16 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                another path by which local avoidance could steer over the inner
                edge. Stop and rebuild the cardinal route instead. */
             stop=true;
-            next_plan=leveltime+1;
-            if (++stuck_since>25) stuck_since=0;
+            /* Replanning every tic rebuilt the exact same GO_ITEM path and
+               permanently reset path_step=0. Retry at human-scale cadence;
+               if this persists, the new ledge-safe flood start will choose a
+               reachable grid centre on the next rebuild. */
+            if (next_plan > leveltime + 8)
+                next_plan=leveltime+8;
+            if (++stuck_since>25) {
+                next_plan=leveltime+1;
+                stuck_since=0;
+            }
         } else {
             /* Local detour around moving actors. Static lamps and pillars already
                shaped the route. Keep a side for a full second instead of alternating. */
@@ -2117,9 +2854,25 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         }
     } else stuck_since=0;
     if (ledge_protect && !door_cross) {
-        Bot_MoveEx(cmd,mo,tx,ty,stop,ledge_speed);
-        if (!Bot_LedgeCommandSafe(mo,cmd))
-            Bot_MoveEx(cmd,mo,mo->x,mo->y,true,0.0);
+        Bot_LedgeMoveAdaptive(cmd,mo,tx,ty,stop,ledge_speed);
+        /* Command prediction can brake even when the geometric segment passes.
+           Watch the actual checkpoint, not the temporary rail/retreat target,
+           so neither braking nor oscillation can leave this route stuck. */
+        {
+            fixed_t wx = path_step < path_len ? Bot_X(path[path_step]) : goal.x;
+            fixed_t wy = path_step < path_len ? Bot_Y(path[path_step]) : goal.y;
+            fixed_t remaining = P_AproxDistance(wx-mo->x,wy-mo->y);
+            if (progress_dist == INF || remaining < progress_dist-FRACUNIT/2) {
+                progress_dist = remaining;
+                last_progress = leveltime;
+            } else if (leveltime-last_progress >= TICRATE) {
+                next_plan = leveltime+1;
+                last_progress = leveltime;
+                I_Log("Bot: ledge stalled pos=(%d,%d) target=(%d,%d) path=%d/%d cmd=(%d,%d)\n",
+                      mo->x/FRACUNIT,mo->y/FRACUNIT,wx/FRACUNIT,wy/FRACUNIT,
+                      path_step,path_len,cmd->forwardmove,cmd->sidemove);
+            }
+        }
     } else
         Bot_Move(cmd,mo,tx,ty,stop);
 }

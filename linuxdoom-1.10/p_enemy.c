@@ -180,6 +180,11 @@ boolean P_CheckMeleeRange (mobj_t*	actor)
 	return false;
 		
     pl = actor->target;
+    /* Melee requires overlapping vertical body ranges. XY distance and sight
+       alone let demons bite players standing on a platform above them. */
+    if (pl->z >= actor->z + actor->height ||
+        actor->z >= pl->z + pl->height)
+        return false;
     dist = P_AproxDistance (pl->x-actor->x, pl->y-actor->y);
 
     if (dist >= MELEERANGE-20*FRACUNIT+pl->info->radius)

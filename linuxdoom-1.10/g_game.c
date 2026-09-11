@@ -1448,6 +1448,10 @@ void G_DoLoadGame (void)
     for (i=0 ; i<MAXPLAYERS ; i++) 
 	playeringame[i] = *save_p++; 
 
+    /* Saves do not contain fastparm. Restore the explicit launch option,
+       rather than inheriting the last attract-mode demo's gameplay flags.
+       Nightmare speed remains controlled separately by G_InitNew. */
+    fastparm = M_CheckParm("-fast") != 0;
     // load a base level 
     G_InitNew (gameskill, gameepisode, gamemap); 
  
