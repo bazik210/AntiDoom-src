@@ -174,8 +174,7 @@ void D_ProcessEvents (void)
     {
 	ev = &events[eventtail];
 	/* Console input takes precedence over menu hotkeys, including Escape. */
-	if (gamestate == GS_LEVEL &&
-	    (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE)))
+	if (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE))
 	{
 	    G_Responder(ev);
 	    continue;
@@ -374,6 +373,7 @@ void D_Display (void)
     if (!wipe)
     {
 	M_Drawer ();          // menu is drawn even on top of everything
+        if (console_on) HU_Drawer();
 	NetUpdate ();         // send out any new accumulation
 	I_FinishUpdate ();              // page flip or blit buffer
 	return;

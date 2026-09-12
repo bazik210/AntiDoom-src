@@ -42,6 +42,7 @@ rcsid[] = "$Id: hu_stuff.c,v 1.4 1997/02/03 16:47:52 b1 Exp $";
 
 #include "doomstat.h"
 #include "g_game.h"
+#include "m_menu.h"
 #include "i_system.h"
 #include "v_video.h"
 
@@ -149,7 +150,7 @@ static void CON_Execute(void)
 {
     char command[HU_MAXLINELENGTH+1];
     char *name, *arg;
-    player_t *p = plr;
+    player_t *p = gamestate == GS_LEVEL ? plr : NULL;
 
     strcpy(command, w_console_input.l.l + w_console_input.lm);
     if (!command[0]) {
@@ -168,8 +169,11 @@ static void CON_Execute(void)
     if (!name) { CON_ResetInput(); return; }
 
     if (CON_Equals(name, "help")) {
-        CON_Print("help map idclev bot god noclip give status fps clear");
+        CON_Print("help map idclev bot god noclip");
+        CON_Print("give status fps clear quit");
         CON_Print("give keys | give weapons | give all");
+    } else if (CON_Equals(name, "quit")) {
+        I_Quit();
     } else if (CON_Equals(name, "bot")) {
         bot_active = !bot_active;
         CON_Print(bot_active ? "BOT MODE: ON" : "BOT MODE: OFF");
@@ -224,6 +228,7 @@ static void CON_Execute(void)
 static void CON_Toggle(void)
 {
     if (!console_on) {
+        M_ClearMenus();
         console_prev_paused = paused;
         console_on = true;
         paused = true;
@@ -536,6 +541,12 @@ void HU_Init(void)
 	hu_font[i] = (patch_t *) W_CacheLumpName(buffer, PU_STATIC);
     }
 
+    console_on = false;
+    HUlib_initSText(&w_console_output, 4, 96, HU_MAXLINES, hu_font,
+                    HU_FONTSTART, &console_on);
+    HUlib_initIText(&w_console_input, 4, 4, hu_font,
+                    HU_FONTSTART, &console_on);
+    CON_ResetInput();
 }
 
 void HU_Stop(void)
@@ -624,7 +635,18 @@ void HU_Drawer(void)
         int y, rows = CONSOLE_HEIGHT * SCREEN_MUL;
         for (y=0; y<rows && y<SCREENHEIGHT; ++y)
             memset(screens[0] + y*SCREENWIDTH, 0, SCREENWIDTH);
-        HUlib_drawSText(&w_console_output);
+        /* Queue slots have fixed HUD coordinates. Place copies by age so
+           wrapping the ring cannot move replies above their command echo. */
+        for (y=0; y<w_console_output.h; ++y) {
+            int idx=(w_console_output.cl-y+w_console_output.h)%w_console_output.h;
+            hu_textline_t line=w_console_output.l[idx];
+            line.y=96-y*(SHORT(hu_font[0]->height)+1);
+            HUlib_drawTextLine(&line,false);
+        }
+        /* Each ring slot already owns its chronological vertical position.
+           HUlib_drawSText walks the ring backwards from the newest slot, so
+           the echoed command stays above its response. */
+        //HUlib_drawSText(&w_console_output);
         HUlib_drawIText(&w_console_input);
         return;
     }

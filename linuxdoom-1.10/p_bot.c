@@ -48,6 +48,7 @@ static int next_ledge_diagnostic;
 static fixed_t last_x, last_y, progress_dist;
 static int use_until, last_keys;
 static int next_key_memory_scan;
+static boolean had_ranged_ammo;
 
 /* Short progression lock:
    prevents explore/loot from stealing control after important actions */
@@ -58,6 +59,10 @@ static int action_commit_line = -1;
    keyed line is currently outside the reachable flood component (for example
    MAP02: ordinary door first, red-key columns behind it). */
 static int key_progress_mask = 0;
+/* Mandatory follow-up interaction after opening special progression gates.
+   Prevents explore from stealing control before a nearby button is pressed. */
+static int forced_progress_line = -1;
+static int forced_progress_until = 0;
 static mobj_t *combat_target, *ignored_target;
 static int combat_health, combat_progress, ignore_until;
 static fixed_t probe_radius = BOT_RADIUS;
@@ -93,9 +98,17 @@ static boolean map03_platform_done = false;
 static boolean map03_teleport_done = false;
 static boolean map03_final_lift_done = false;
 static boolean map03_red_door_done = false;
+static boolean map03_blue_door_done = false;
+static boolean map02_key_perch_hold = false;
+static int map02_key_perch_until = 0;
+static fixed_t map02_key_perch_x = 0, map02_key_perch_y = 0;
 static boolean map04_route = false;
 static boolean map04_lift_triggered = false;
 static boolean map04_lift_done = false;
+static boolean map04_crate_route = false;
+static boolean map04_crate_retry = false;
+static int map04_yellow_state = 0;
+#include "p_bot_routes.h"
 
 /* Combat hysteresis.  A target must be genuinely shootable to steal the
    navigation angle.  Short LOS flickers keep the old view angle, but never
@@ -616,7 +629,9 @@ static boolean Bot_RunLinkGeometry(int start, int land)
     if (len_units < RUN_MIN_DISTANCE || len_units > RUN_MAX_DISTANCE) return false;
 
     /* No special traversal is needed if normal grounded movement works. */
-    if (Bot_Walk(sx, sy, start_floor, tx, ty, NULL, false)) return false;
+    if (Bot_Walk(sx, sy, start_floor, tx, ty, NULL, false) &&
+        !(map04_crate_route && !Bot_WalkLedgeSafe(sx,sy,start_floor,tx,ty,NULL,false)))
+        return false;
 
     /* Landing at roughly the launch height is what running gaps can solve.
        Large upward steps are not magically made possible by momentum. */
@@ -637,7 +652,9 @@ static boolean Bot_RunLinkGeometry(int start, int land)
         if (probe.ceiling < start_floor + 56*FRACUNIT) return false;
         if (floor > start_floor + 24*FRACUNIT) return false;
 
-        if (floor < start_floor - 24*FRACUNIT) {
+        if (floor < start_floor - 24*FRACUNIT ||
+            (map04_crate_route && R_PointInSubsector(px,py)->sector->floorheight <
+             start_floor-24*FRACUNIT)) {
             if (gap_first < 0) gap_first = n;
             gap_last = n;
         }
@@ -715,7 +732,10 @@ static boolean Bot_RunCandidateToPoint(fixed_t x, fixed_t y, fixed_t z, int prio
                 boundary = 1; break;
             }
         }
-        if (!boundary) continue;
+        if (map04_crate_route) {
+            /* Land inside a crate, leaving room to brake running momentum. */
+            if (Bot_DropClearance(Bot_X(land),Bot_Y(land)) < 24) continue;
+        } else if (!boundary) continue;
 
         for (d = 0; d < 16; ++d) {
             for (k = 3; k <= 20; ++k) {
@@ -918,7 +938,10 @@ static boolean Bot_UseDoor(line_t *li)
         case 32: case 33: case 34:
         case 61: case 63: case 99: case 114: case 115:
         case 133: case 134: case 135: case 136: case 137:
-            return li->tag && li->backsector && li->backsector->tag == li->tag;
+            /* A narrow pillar face is a remote gate control, not a doorway
+               the player's whole body can cross (MAP02 red bars). */
+            return li->tag && li->backsector && li->backsector->tag == li->tag &&
+                   P_AproxDistance(li->dx,li->dy) > 2*BOT_RADIUS;
     }
     return false;
 }
@@ -1233,8 +1256,38 @@ static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
     return true;
 }
 
+/* Reserve combat movement for weapons that can actually hurt a distant
+   target. Empty fists must not suppress the navigation needed to rearm. */
+static boolean Bot_HasRangedAmmo(player_t *p)
+{
+    int w;
+    for (w=wp_pistol; w<NUMWEAPONS; ++w) {
+        ammotype_t ammo=weaponinfo[w].ammo;
+        int needed=w==wp_bfg ? 40 : w==wp_supershotgun ? 2 : 1;
+        if (p->weaponowned[w] && ammo!=am_noammo && p->ammo[ammo]>=needed)
+            return true;
+    }
+    return false;
+}
+
+static boolean Bot_RearmPickup(player_t *p, mobj_t *mo)
+{
+    switch (mo->sprite) {
+    case SPR_CLIP: case SPR_AMMO: case SPR_SHOT: case SPR_SGN2:
+    case SPR_MGUN: case SPR_PLAS: case SPR_LAUN: case SPR_BFUG:
+    case SPR_BPAK: return true;
+    case SPR_SHEL: case SPR_SBOX:
+        return p->weaponowned[wp_shotgun] || p->weaponowned[wp_supershotgun];
+    case SPR_CELL: case SPR_CELP:
+        return p->weaponowned[wp_plasma] || p->weaponowned[wp_bfg];
+    case SPR_ROCK: case SPR_BROK: return p->weaponowned[wp_missile];
+    default: return false;
+    }
+}
+
 static int Bot_ItemPriority(player_t *p, mobj_t *mo)
 {
+    if (!Bot_HasRangedAmmo(p) && Bot_RearmPickup(p,mo)) return -40000;
     switch (mo->sprite) {
         case SPR_BKEY: case SPR_BSKU: return Bot_HasKey(p, it_bluecard) ? INF : -2500;
         case SPR_RKEY: case SPR_RSKU: return Bot_HasKey(p, it_redcard)  ? INF : -2500;
@@ -1362,6 +1415,34 @@ static void Bot_CheckPendingUse(void)
             line_key_memory[pending_use_line] = 0;
         Bot_ClearKeyProgressForSpecial(pending_use_special);
 
+        /* MAP02: after opening the red-key bars, the nearby switch is the next
+           mandatory progression step. Remember it as a short story objective
+           instead of allowing explore/combat to pull the bot away. */
+        if (map02_route && Bot_Key(pending_use_special) == it_redcard) {
+            int i;
+            fixed_t cx = li->v1->x + li->dx/2;
+            fixed_t cy = li->v1->y + li->dy/2;
+            fixed_t best = INT_MAX;
+            for (i=0; i<numlines; ++i) {
+                line_t *cand = &lines[i];
+                int d;
+                if (!Bot_UseSpecial(cand->special) || line_used[i]) continue;
+                if (Bot_Key(cand->special) >= 0) continue;
+                d = P_AproxDistance((cand->v1->x+cand->dx/2)-cx,
+                                    (cand->v1->y+cand->dy/2)-cy);
+                if (d < best && d < 768*FRACUNIT) {
+                    best = d;
+                    forced_progress_line = i;
+                }
+            }
+            if (forced_progress_line >= 0) {
+                forced_progress_until = leveltime + TICRATE*30;
+                next_plan = 0;
+                I_Log("Bot: forced progression switch line=%d\n",
+                      forced_progress_line);
+            }
+        }
+
         /* A real tagged action just started. Keep the bot nearby long enough to
            observe/use the result instead of immediately shopping for ammo. */
         if (pending_use_line == post_use_line && leveltime + 105 > post_use_local_until)
@@ -1446,6 +1527,18 @@ static void Bot_Plan(player_t *p)
     fixed_t key_target_x = 0, key_target_y = 0;
     int key_target_score = INF;
 
+    if (forced_item_active) {
+        boolean exists = false;
+        for (th=thinkercap.next; th!=&thinkercap; th=th->next) {
+            mobj_t *item;
+            if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+            item=(mobj_t *)th;
+            if ((item->flags & MF_SPECIAL) &&
+                P_AproxDistance(item->x-forced_item_x,item->y-forced_item_y) < 48*FRACUNIT &&
+                Bot_ItemPriority(p,item) != INF) { exists=true; break; }
+        }
+        if (!exists) { forced_item_active=false; forced_item_until=0; }
+    }
     Bot_Flood(p);
 	boolean prefer_forward = (leveltime < commit_forward_until);
 
@@ -1494,6 +1587,14 @@ static void Bot_Plan(player_t *p)
 
     goal.type = GO_NONE; goal.score = INF; goal.line = -1; path_len = path_step = 0;
 
+    /* Hints use ordinary flood paths and validated USE approach points. */
+    if (forced_progress_line >= 0) {
+        if (line_used[forced_progress_line] || leveltime >= forced_progress_until) {
+            forced_progress_line = -1;
+            forced_progress_until = 0;
+        } else story_target = forced_progress_line;
+    }
+
     /* Geometry identity is checked once at level initialization. Restore
        progression from actual position/key/world state when loading a save. */
     if (map03_route) {
@@ -1502,6 +1603,9 @@ static void Bot_Plan(player_t *p)
         if (!map03_platform_done)
             story_target = 87;
         else if (Bot_HasKey(p,0)) {
+            if (line_used[map03_blue_door_left] ||
+                line_used[map03_blue_door_right])
+                map03_blue_door_done = true;
             if (Bot_HasKey(p,it_redcard)) {
                 /* The red key is not the end of MAP03's puzzle. The lower room
                    first needs the left lift transaction; only after the bot is
@@ -1514,8 +1618,20 @@ static void Bot_Plan(player_t *p)
                 else if (lines[554].special)
                     story_target = 554;
             } else {
-                story_target = lines[431].special ? 431 :
-                    (map03_teleport_done ? -1 : 418);
+                /* The switch is behind the left blue door (split across two
+                   linedefs). Finish that doorway before targeting the switch;
+                   otherwise both door faces remain equally attractive and the
+                   planner can alternate between them forever. */
+                if (lines[map03_blue_button].special) {
+                    if (!map03_blue_door_done &&
+                        !line_used[map03_blue_door_left] &&
+                        !line_used[map03_blue_door_right])
+                        story_target = map03_blue_door_left;
+                    else
+                        story_target = map03_blue_button;
+                } else {
+                    story_target = map03_teleport_done ? -1 : 418;
+                }
             }
         }
         if (story_target >= 0) {
@@ -1524,21 +1640,43 @@ static void Bot_Plan(player_t *p)
             story_y = story->v1->y + story->dy/2;
         }
     }
-    if (map04_route && Bot_HasKey(p,it_bluecard)) {
+    if (map04_route && !Bot_HasKey(p,it_yellowcard) && Bot_HasKey(p,it_bluecard)) {
         /* MAP04's final lift is a walk-over trigger on the small box in sector
            78. After the blue door, make that trigger the story destination;
            generic exploration otherwise keeps circling the old blue-door area. */
         if (Bot_HasKey(p,it_redcard)) {
-            if (!line_used[16] && !line_used[19])
+            if (map04_crate_route)
+                story_target = 459;
+            else if (!line_used[16] && !line_used[19])
                 story_target = 16;
             else if (lines[574].special)
                 story_target = 574;
-        } else if (!line_used[302] && !line_used[304])
+        } else if (map04_crate_retry)
+            story_target = 408;
+        else if (!line_used[302] && !line_used[304])
             story_target = 302;
         else if (!line_used[388] && !line_used[393])
             story_target = 388;
         else if (!map04_lift_triggered && !map04_lift_done)
             story_target = 408;
+    }
+    if (map04_route && Bot_HasKey(p,it_yellowcard)) {
+        int sector = p->mo->subsector->sector-sectors;
+        /* Recover from saves using destination sectors and switch state. */
+        if (map04_yellow_state == 0) map04_yellow_state = 1;
+        if (sector >= 111 && sector <= 118) map04_yellow_state = 2;
+        if (map04_yellow_state == 2 &&
+            (!lines[map04_yellow_switch].special || line_used[map04_yellow_switch]))
+            map04_yellow_state = 3;
+        if (!lines[map04_yellow_switch].special && sector == 67)
+            map04_yellow_state = 4;
+        story_target = map04_yellow_state == 1 ? map04_yellow_entry :
+                       map04_yellow_state == 2 ? map04_yellow_switch :
+                       map04_yellow_state == 3 ? map04_yellow_return : 546;
+    }
+    if (story_target >= 0) {
+        story_x = lines[story_target].v1->x + lines[story_target].dx/2;
+        story_y = lines[story_target].v1->y + lines[story_target].dy/2;
     }
     if (map04_route && story_target == 408) {
         line_t *lift_line=&lines[408];
@@ -1655,8 +1793,11 @@ static void Bot_Plan(player_t *p)
                it closes behind the player. Suppress the immediate turn-back,
                but allow a later re-use instead of trapping the bot inside. */
             if (line_used[i] && Bot_UseDoor(li) && i != story_target &&
-                leveltime-line_used[i] < USED_SWITCH_HARD_COOLDOWN)
-                continue;
+                leveltime-line_used[i] < USED_SWITCH_HARD_COOLDOWN) {
+                P_LineOpening(li);
+                if (openrange >= 56*FRACUNIT || Bot_LineMoving(li)) continue;
+                /* A closed return door is useful again immediately. */
+            }
 
             /* A remote/repeatable switch that already fired is not fresh
                progression.  Hard-ignore it for a while, then keep a large
@@ -1724,7 +1865,8 @@ static void Bot_Plan(player_t *p)
                 }
             }
 
-            if (i != story_target && line_used[i] && !Bot_IsExitSpecial(special))
+            if (i != story_target && line_used[i] && !Bot_IsExitSpecial(special) &&
+                !Bot_UseDoor(li))
                 priority += USED_SWITCH_SOFT_PENALTY;
             if (prefer_forward && special != 11 && special != 51) {
                 priority += 3000;   // РІРѕ РІСЂРµРјСЏ commit СЃРёР»СЊРЅРѕ РЅРµ Р»СЋР±РёС‚ РґСЂСѓРіРёРµ РґРІРµСЂРё/СЃРµРєСЂРµС‚РєРё
@@ -1769,7 +1911,7 @@ static void Bot_Plan(player_t *p)
                 }
             }
             if (map04_route && i == story_target &&
-                (i == 235 || i == 408 || i == 459)) {
+                (i == 235 || i == 408)) {
                 /* The MAP04 lift/teleporter triggers are narrow walk-over
                    strips. Try both faces and let the flood choose whichever
                    side is actually reachable from the current room. */
@@ -1781,6 +1923,17 @@ static void Bot_Plan(player_t *p)
                     Bot_Candidate(GO_WALK,ax+nx,ay+ny,ax,ay,i,priority);
                     Bot_Candidate(GO_WALK,ax-nx,ay-ny,ax,ay,i,priority);
                 }
+                continue;
+            }
+            if (special == 39 || special == 97) {
+                /* Doom teleports only on a front-to-back crossing. The player
+                   may be on the back half-plane in a DIFFERENT room: that is
+                   not a reason to reverse the desired crossing direction. */
+                fixed_t ax=li->v1->x+li->dx/2, ay=li->v1->y+li->dy/2;
+                int side=(p->mo->subsector->sector == li->backsector &&
+                          P_PointOnLineSide(p->mo->x,p->mo->y,li)) ? 1 : -1;
+                Bot_Candidate(GO_WALK,ax+(fixed_t)(side*dy/len*32*FRACUNIT),
+                    ay-(fixed_t)(side*dx/len*32*FRACUNIT),ax,ay,i,priority);
                 continue;
             }
             for (n = 1; n <= 3; ++n) {
@@ -1807,6 +1960,9 @@ static void Bot_Plan(player_t *p)
         mo = (mobj_t*)th;
         if (!(mo->flags & MF_SPECIAL)) continue;
         priority = Bot_ItemPriority(p,mo);
+        if (map04_crate_route && !Bot_HasKey(p,it_redcard) &&
+            (mo->sprite == SPR_RKEY || mo->sprite == SPR_RSKU)) priority=-80000;
+        else if (map04_crate_route) continue;
         if (map03_route && map03_platform_done && !Bot_HasKey(p,it_bluecard) &&
             (mo->sprite == SPR_BKEY || mo->sprite == SPR_BSKU))
             priority = -30000;
@@ -1938,26 +2094,21 @@ void Bot_InitLevel(void)
     map03_teleport_done = false;
     map03_final_lift_done = false;
     map03_red_door_done = false;
-    /* MAP03 alone is not an identity: validate all navigation geometry lumps.
-       Raw WAD data stays unchanged when a saved game's movers are restored. */
-    if (gamemode == commercial && gamemap == 3 && numlines == 594 && numsectors == 121) {
-        static const int offsets[] = {2,3,4,8};
-        unsigned int hash = 2166136261u;
-        int base = W_CheckNumForName("MAP03"), k, j;
-        for (k=0; base >= 0 && k<4; ++k) {
-            int size = W_LumpLength(base+offsets[k]);
-            unsigned char *data = malloc(size);
-            if (!data) I_Error("Bot: map identity allocation failed");
-            W_ReadLump(base+offsets[k],data);
-            for (j=0;j<size;++j) hash=(hash^data[j])*16777619u;
-            free(data);
-        }
-        map03_route = base >= 0 && hash == 0x97516f45u;
-    }
-    map04_route = gamemode == commercial && gamemap == 4 &&
-                  numlines == 591 && numsectors == 122;
+    map03_blue_door_done = false;
+    map02_route = Bot_MatchesRoute(&bot_routes[0]);
+    map03_route = Bot_MatchesRoute(&bot_routes[1]);
+    map04_route = Bot_MatchesRoute(&bot_routes[2]);
+    map02_key_perch_hold = false;
+    map02_key_perch_until = 0;
+    map02_key_perch_x = map02_key_perch_y = 0;
     map04_lift_triggered = false;
     map04_lift_done = false;
+    map04_crate_route = map04_crate_retry = false;
+    map04_yellow_state = 0;
+    forced_progress_line = -1;
+    forced_progress_until = 0;
+    action_commit_until = 0;
+    action_commit_line = -1;
     free(cells); free(heap); free(path); free(line_tries); free(line_retry); free(line_used); free(sector_visits); free(run_marks); free(line_key_memory);
     cells = NULL; heap = path = line_tries = line_retry = line_used = sector_visits = run_marks = NULL;
     line_key_memory = NULL;
@@ -1978,6 +2129,7 @@ void Bot_InitLevel(void)
     next_plan = use_until = 0; last_sector = -1; last_keys = 0;
     explore_cooldown_cell = -1; explore_cooldown_until = 0;
     next_key_memory_scan = 0;
+    had_ranged_ammo = true;
     key_progress_mask = 0;
     stuck_since = last_progress = 0; last_x = last_y = 0;
     next_ledge_diagnostic = 0;
@@ -2479,6 +2631,7 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist)
     if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell]>=2) best = wp_supershotgun;
     if (p->weaponowned[wp_missile] && p->ammo[am_misl]>0 && dist>400*FRACUNIT) best = wp_missile;
     if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0) best = wp_plasma;
+    else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40) best = wp_bfg;
     if (best != p->readyweapon && p->pendingweapon == wp_nochange) {
         /* The classic command has only three weapon bits; SSG uses slot 3. */
         int slot = best == wp_supershotgun ? wp_shotgun : best;
@@ -2656,7 +2809,7 @@ static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
 
     /* Near the landing in XY is not a landing: the player may still be above
        the gap. Hand control back only after reaching supported floor. */
-    if (dist < 20*FRACUNIT && mo->z <= mo->floorz &&
+    if (dist < (map04_crate_route ? 8 : 20)*FRACUNIT && mo->z <= mo->floorz &&
         mo->floorz >= run_start_z-24*FRACUNIT &&
         R_PointInSubsector(mo->x,mo->y)->sector->floorheight >= mo->floorz-24*FRACUNIT) {
         run_state = 0;
@@ -2894,6 +3047,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     boolean door_fighting = false;
     boolean lift_riding = false;
     boolean ledge_protect = false;
+    boolean combat_route_lock = false;
     double ledge_speed = 4.2;
     static int next_door_combat_log = 0;
     memset(cmd,0,sizeof(*cmd));
@@ -2902,6 +3056,64 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (!count) return;
     if (run_state && Bot_RunCommand(cmd,p)) return;
 
+    if (had_ranged_ammo && !Bot_HasRangedAmmo(p)) next_plan=0;
+    had_ranged_ammo=Bot_HasRangedAmmo(p);
+    if (map04_route && Bot_HasKey(p,it_bluecard) && !Bot_HasKey(p,it_yellowcard)) {
+        int room=mo->subsector->sector-sectors;
+        if (room >= 37 && room <= 45 && mo->z >= 40*FRACUNIT) {
+            map04_crate_route=true;
+            map04_crate_retry=false;
+            if (!Bot_HasKey(p,it_redcard)) {
+                /* Lift arrivals need the same precision lock as jump arrivals.
+                   Keep it across the gaps between the three key crates. */
+                if (!forced_item_active) next_plan=0;
+                forced_item_active=true;
+                forced_item_x=-192*FRACUNIT; forced_item_y=1568*FRACUNIT;
+                forced_item_until=leveltime+2100;
+            }
+        }
+        if (room == 80) map04_crate_route=false; /* real teleport destination */
+        if (room >= 37 && room <= 50 && mo->z <= mo->floorz &&
+            mo->z < 40*FRACUNIT && !Bot_HasKey(p,it_redcard) &&
+            (map04_crate_route || map04_lift_done)) {
+            map04_crate_route=false;
+            map04_crate_retry=true;
+            map04_lift_done=false;
+            forced_item_active=false; forced_item_until=0;
+            if (lift_commit_line == 408) Bot_ClearLiftCommit();
+            if (!sectors[38].specialdata) map04_lift_triggered=false;
+            line_retry[408]=line_retry[409]=0;
+            next_plan=0;
+        }
+        if (map04_crate_retry && !sectors[38].specialdata)
+            map04_lift_triggered=false;
+        if (Bot_HasKey(p,it_redcard) && room >= 37 && room <= 45)
+            map04_crate_route=true;
+    }
+    /* A lift can leave the player on the crate lip. Strict ledge-safe
+       flood connectors reject that starting point, including every route
+       inward. Recenter on this verified rectangular crate before planning. */
+    if (map04_crate_route && !Bot_HasKey(p,it_redcard) && mo->z == mo->floorz &&
+        (mo->subsector->sector->floorheight < mo->z ||
+         Bot_DropClearance(mo->x,mo->y) < 24)) {
+        static const int crates[] = {38,42,44};
+        int k, best=-1;
+        fixed_t bestdist=80*FRACUNIT;
+        for (k=0;k<3;++k) {
+            sector_t *crate=&sectors[crates[k]];
+            fixed_t cx=crate->soundorg.x, cy=crate->soundorg.y;
+            fixed_t d=P_AproxDistance(cx-mo->x,cy-mo->y);
+            if (mo->z != crate->floorheight || d>=bestdist) continue;
+            if (!Bot_WalkStable(mo->x,mo->y,mo->z,cx,cy,mo,true)) continue;
+            best=k; bestdist=d;
+        }
+        if (best>=0) {
+            sector_t *crate=&sectors[crates[best]];
+            Bot_MoveEx(cmd,mo,crate->soundorg.x,crate->soundorg.y,false,2.0);
+            next_plan=0;
+            return;
+        }
+    }
     Bot_CheckPendingUse();
     /* Do not aim at a distant key while retaining the lift footprint. */
     if (map03_route && progress_sector == 14) {
@@ -3060,6 +3272,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             I_Log("Bot: crossed door line=%d\n",crossed_line);
             if (map03_route && crossed_line == 458)
                 map03_red_door_done = true;
+            if (map03_route &&
+                (crossed_line == map03_blue_door_left ||
+                 crossed_line == map03_blue_door_right))
+                map03_blue_door_done = true;
 
             /* Record a completed traversal, not merely a USE attempt. */
             /* Remember both faces of the same physical door. */
@@ -3113,6 +3329,23 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         if (gained) {
             key_progress_mask |= gained;
 
+            /* MAP02's red key is on a raised house. Hold that safe height for
+               a short engagement after pickup so visible monsters below can be
+               cleared before navigation considers the drop back down. */
+            if (map02_route && (gained & ((1 << it_bluecard) |
+                                          (1 << it_yellowcard) |
+                                          (1 << it_redcard))) &&
+                p->mo->z >= 48*FRACUNIT &&
+                P_AproxDistance(p->mo->x-map02_key_house_x*FRACUNIT,
+                                p->mo->y-map02_key_house_y*FRACUNIT) <
+                256*FRACUNIT) {
+                map02_key_perch_hold = true;
+                map02_key_perch_until = leveltime + TICRATE*3;
+                map02_key_perch_x = p->mo->x;
+                map02_key_perch_y = p->mo->y;
+                I_Log("Bot: MAP02 red-key perch hold started\n");
+            }
+
             if (line_key_memory) {
                 for (li=0; li<numlines; ++li) {
                     int key=Bot_Key(lines[li].special);
@@ -3133,12 +3366,17 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     last_x = mo->x; last_y = mo->y;
     /* Finish the already selected door crossing before doing another flood
        and off-mesh search. Replanning here can pause an otherwise open door. */
-    if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding)
+    if (leveltime >= map02_key_perch_until)
+        map02_key_perch_hold = false;
+    if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding &&
+        !map02_key_perch_hold)
         Bot_Plan(p);
     ledge_protect = (forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
                      P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
 
+    combat_route_lock = map02_key_perch_hold || map04_crate_route || ledge_protect ||
+        (goal.type != GO_NONE && !Bot_LedgeSafe(mo->x,mo->y));
     if (!ledge_protect) {
         ledge_anchor_valid=false;
         ledge_recover_until=0;
@@ -3510,6 +3748,14 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         stop = true;
     }
 
+    if (map02_key_perch_hold && door_commit_line < 0 && !lift_riding) {
+        /* Keep feet on the pickup platform while the combat controller may
+           still turn the view toward monsters below. */
+        tx = map02_key_perch_x;
+        ty = map02_key_perch_y;
+        stop = true;
+    }
+
     if (lift_riding) {
         if (map03_route && !map03_platform_done) {
             tx=2816*FRACUNIT; ty=3360*FRACUNIT; stop=false;
@@ -3536,6 +3782,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        monster.  This prevents path-angle / monster-angle ping-pong at corners. */
     boolean combat_view_grace = (!threat && combat_target && leveltime < combat_commit_until);
     boolean prefer_combat = false;
+    boolean ranged_ammo = Bot_HasRangedAmmo(p);
+    boolean can_fire = false;
 
     if (threat && combat_has_shot) {
         fixed_t d = P_AproxDistance(threat->x - mo->x, threat->y - mo->y);
@@ -3544,7 +3792,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         fixed_t dz = abs(hismid-mymid);
         boolean combat_moved = false;
 
-        prefer_combat = d < 500*FRACUNIT;
+        prefer_combat = ranged_ammo && !combat_route_lock && d < 500*FRACUNIT;
+        can_fire = d < 500*FRACUNIT;
         /* While approaching a timed platform, combat may still aim and fire,
            but it must not replace the route with an endless dodge/strafe. */
         if (lift_commit_line >= 0 && !lift_commit_boarded)
@@ -3562,7 +3811,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             prefer_combat = false;
         }
 
-        if (threat->type == MT_CHAINGUY && d < 420*FRACUNIT) {
+        if (!combat_route_lock && threat->type == MT_CHAINGUY && d < 420*FRACUNIT) {
             fixed_t retreatx, retreaty;
             if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
                                        &retreatx,&retreaty)) {
@@ -3573,6 +3822,14 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 stop=false;
                 combat_moved=true;
             }
+        }
+
+        if (weaponinfo[p->readyweapon].ammo == am_noammo) prefer_combat=false;
+        if (!ranged_ammo && !ledge_protect && !door_waiting &&
+            goal.type != GO_ITEM && d < 192*FRACUNIT && dz < 24*FRACUNIT &&
+            Bot_WalkStable(mo->x,mo->y,mo->z,threat->x,threat->y,mo,false)) {
+            tx=threat->x; ty=threat->y; stop=false;
+            combat_moved=true;
         }
 
         /* Ordinary combat strafing is now a short burst around the position
@@ -3667,7 +3924,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             stop = true;
         }
         if (mlook) lookdir = 0;
-    } else if (combat_view_grace && !interaction_lock && !ready_to_run &&
+    } else if (ranged_ammo && combat_view_grace && !interaction_lock && !ready_to_run &&
                !exit_goal && !door_waiting) {
         /* Recompute the bearing to the last-known position. A frozen absolute
            angle becomes wrong as the player moves and can itself cause a snap.
@@ -3688,7 +3945,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        own avoidance pass: predict impact and override movement while preserving
        the aim on the monster.  Do not do this during precision traversal or
        while operating/crossing a door. */
-    if (!ready_to_run && !interaction_lock &&
+    if (!combat_route_lock && !ready_to_run && !interaction_lock &&
         !door_cross && !door_waiting && !door_fighting && !lift_riding &&
         !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
@@ -3837,11 +4094,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         I_Log("Bot: use line=%d special=%d\n", goal.line, sp);
         }
     }
-    else if (threat && prefer_combat && abs(turn) < 900 &&
+    else if (threat && can_fire && abs(turn) < 900 &&
              (threat->type != MT_BARREL || p->pendingweapon == wp_nochange)) {
         angle_t shot = mo->angle + (angle_t)((int)cmd->angleturn * 65536);
-        P_AimLineAttack(mo, shot, MISSILERANGE);
-        if (linetarget == threat) {
+        ammotype_t ammo=weaponinfo[p->readyweapon].ammo;
+        int needed=p->readyweapon==wp_bfg ? 40 : p->readyweapon==wp_supershotgun ? 2 : 1;
+        P_AimLineAttack(mo, shot, ammo==am_noammo ? MELEERANGE : MISSILERANGE);
+        if (linetarget == threat && (ammo==am_noammo || p->ammo[ammo]>=needed)) {
             cmd->buttons |= BT_ATTACK;
         }
     }
@@ -3926,8 +4185,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             } else {
                 /* Do not freeze the player when local avoidance fails.
                    Replanning is cheaper than a permanent walk animation loop. */
-                stop=false;
-                next_plan=leveltime+12;
+                stop=true;
+                if (next_plan > leveltime+12) next_plan=leveltime+12;
             }
 
             if (++stuck_since>25) {

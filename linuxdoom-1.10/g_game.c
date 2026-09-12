@@ -570,8 +570,7 @@ void G_DoLoadLevel (void)
 // 
 boolean G_Responder (event_t* ev) 
 { 
-    if (gamestate == GS_LEVEL &&
-        (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE))) {
+    if (console_on || (ev->type == ev_keydown && ev->data1 == KEY_CONSOLE)) {
         memset(gamekeydown, 0, sizeof(gamekeydown));
         memset(mousearray, 0, sizeof(mousearray));
         memset(joyarray, 0, sizeof(joyarray));
