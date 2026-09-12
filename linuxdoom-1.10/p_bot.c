@@ -987,7 +987,7 @@ static boolean Bot_PlatformCenter(mobj_t *mo, plat_t *plat, fixed_t *tx, fixed_t
         fixed_t x=mo->x+dx*FRACUNIT, y=mo->y+dy*FRACUNIT;
         int score=abs(dx)+abs(dy);
         if (score>=best || !Bot_PlatformInterior(plat->sector,x,y)) continue;
-        if (!Bot_Walk(mo->x,mo->y,mo->z,x,y,mo,true) ||
+        if (!Bot_Walk(mo->x,mo->y,mo->z,x,y,mo,false) ||
             probe.ceiling < plat->high+mo->height) continue;
         best=score; *tx=x; *ty=y;
     }
@@ -1885,6 +1885,25 @@ static void Bot_Plan(player_t *p)
        still allowing combat to own movement at runtime. */
     if (lift_commit_line >= 0 && leveltime < lift_commit_until)
         Bot_LiftCommitGoal(p);
+    if (!map02_route && !map03_route && !map04_route) {
+        for (i=0; i<MAXPLATS; ++i) {
+            plat_t *plat = activeplats[i];
+            fixed_t cx, cy;
+            if (!plat || plat->status == in_stasis || plat->status == up) continue;
+            if (plat->sector == p->mo->subsector->sector) continue;
+            if (plat->sector->floorheight > p->mo->z + 24*FRACUNIT) continue;
+            if (p->mo->z - plat->sector->floorheight > 256*FRACUNIT) continue;
+            if (Bot_PlatformCenter(p->mo, plat, &cx, &cy)) {
+                goal.type = GO_WALK;
+                goal.x = cx; goal.y = cy;
+                goal.aimx = cx; goal.aimy = cy;
+                goal.line = -1;
+                goal.cell = Bot_NearCell(cx, cy, plat->sector->floorheight, false);
+                goal.score = -48000;
+                break;
+            }
+        }
+    }
 
     if (map03_route && progress_sector >= 0 && leveltime < progress_until) {
         int progress_cell=-1, progress_score=INF;
@@ -3823,7 +3842,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             } else {
                 direct_ok = progress_goal ?
                     Bot_Walk(mo->x,mo->y,mo->z,tx,ty,mo,true) :
-                    stable_goal ?
+                    (stable_goal && goal.score > -48000) ?
                     Bot_WalkStable(mo->x,mo->y,mo->z,tx,ty,mo,true) :
                     Bot_Walk(mo->x,mo->y,mo->z,tx,ty,mo,true);
 
@@ -3831,7 +3850,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     if (path_step < path_len) { tx = Bot_X(path[path_step]); ty = Bot_Y(path[path_step]); }
                     for (i=path_step; i<path_len && i<path_step+lookahead; ++i) {
                         fixed_t px=Bot_X(path[i]), py=Bot_Y(path[i]);
-                        boolean stable_step = cells[path[i]].floor >= mo->z-24*FRACUNIT;
+                        boolean stable_step = (goal.score > -48000) && cells[path[i]].floor >= mo->z-24*FRACUNIT;
                         boolean step_ok;
                         if (P_AproxDistance(px-mo->x,py-mo->y)>maxlook) break;
                         step_ok = progress_goal ?
@@ -3925,7 +3944,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 stop=true;
             }
         } else if (dist < 12*FRACUNIT && goal.type == GO_WALK &&
-                   ((lift_commit_line >= 0 && !lift_commit_boarded) ||
+                   ((lift_commit_line >= 0 && !lift_commit_boarded && goal.score > -48000) ||
                     (map03_route && progress_sector >= 0 && leveltime < progress_until))) {
             /* Waiting for a moving lift must not trigger a one-tic replan loop.
                Keep progression goals for a few tics while the floor or route
@@ -4433,7 +4452,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                         fixed_t remain;
                         int score;
 
-                        if (!Bot_WalkStable(mo->x,mo->y,mo->z,px,py,mo,true))
+                        if (!(R_PointInSubsector(blocked_tx,blocked_ty)->sector->floorheight < mo->z-24*FRACUNIT ?
+                              Bot_Walk(mo->x,mo->y,mo->z,px,py,mo,true) :
+                              Bot_WalkStable(mo->x,mo->y,mo->z,px,py,mo,true)))
                             continue;
 
                         remain=P_AproxDistance(blocked_tx-px,blocked_ty-py);
