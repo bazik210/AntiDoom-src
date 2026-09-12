@@ -3,6 +3,7 @@
 #undef main
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "doomstat.h"
 #include "m_argv.h"
 #include "p_local.h"
@@ -23,6 +24,7 @@ int main(int argc, char **argv)
 {
     char *wads[2];
     int limit, t, map, episode, skill;
+    clock_t worst_cmd=0, total_cmd=0;
     if (argc < 4) return 2;
     setbuf(stdout, NULL);
     myargc = argc; myargv = argv;
@@ -44,11 +46,22 @@ int main(int argc, char **argv)
             generic_key ? generic_key->x/FRACUNIT:0,generic_key ? generic_key->y/FRACUNIT:0);
     }
     for (t = 0; t < limit && gameaction == ga_nothing; ++t) {
+        int run_before=next_run_search,plan_before=next_plan;
+        clock_t start=clock(),elapsed;
         Bot_BuildTiccmd(&players[0].cmd, &players[0]);
+        elapsed=clock()-start;total_cmd+=elapsed;
+        if(elapsed>worst_cmd)worst_cmd=elapsed;
+        if(elapsed*1000/CLOCKS_PER_SEC>=25)
+            printf("SLOW tic=%d ms=%.2f plan=%d runsearch=%d goal=%d/%d pos=%d,%d\n",
+                t,elapsed*1000.0/CLOCKS_PER_SEC,plan_before<=leveltime,
+                run_before!=next_run_search,goal.type,goal.line,
+                players[0].mo->x/FRACUNIT,players[0].mo->y/FRACUNIT);
         P_Ticker(); ++gametic;
         if (!(t % (35 * 30))) printf("PROGRESS tic=%d hp=%d pos=%d,%d kills=%d/%d\n", t, players[0].health, players[0].mo->x/FRACUNIT, players[0].mo->y/FRACUNIT, players[0].killcount, totalkills);
         if (players[0].playerstate == PST_DEAD) break;
     }
+    printf("TIMING max_command_ms=%.2f total_command_ms=%.2f\n",
+           worst_cmd*1000.0/CLOCKS_PER_SEC,total_cmd*1000.0/CLOCKS_PER_SEC);
     printf("RESULT map=%d episode=%d nomonsters=%d skill=%d tics=%d hp=%d action=%d kills=%d/%d pos=%d,%d\n", map, episode, nomonsters, skill+1, t, players[0].health, gameaction, players[0].killcount, totalkills, players[0].mo->x/FRACUNIT, players[0].mo->y/FRACUNIT);
     printf("GOAL type=%d line=%d xy=%d,%d lift=%d boarded=%d sector=%d\n",
         goal.type,goal.line,goal.x/FRACUNIT,goal.y/FRACUNIT,lift_commit_line,

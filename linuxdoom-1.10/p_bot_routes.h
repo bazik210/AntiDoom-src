@@ -5,9 +5,10 @@
 #define P_BOT_ROUTES_H
 typedef struct { int map; unsigned int geometry; } bot_route_id_t;
 static const bot_route_id_t bot_routes[] = {
-    {2, 0x93ead084u}, {3, 0x97516f45u}, {4, 0x4c27f840u}
+    {2, 0x93ead084u}, {3, 0x97516f45u}, {4, 0x4c27f840u}, {5, 0xd6dd2008u}
 };
 static boolean map02_route;
+static boolean map05_route;
 enum { map04_yellow_entry = 532, map04_yellow_switch = 553,
        map04_yellow_return = 562 };
 /* MAP03: the blue key opens the left-hand door pair before the switch in the
