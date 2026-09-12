@@ -88,6 +88,18 @@ int main(int argc,char **argv)
         CHECK(P_AproxDistance(dodgex-p->mo->x,dodgey-p->mo->y)>=20*FRACUNIT);
     }
     puts("PASS: incoming cacodemon shot overrides pause and starts a sidestep");
+    G_InitNew(sk_medium,1,1);p=&players[0];
+    {
+        mobj_t *barrel,*enemy,*hazard=NULL;
+        p->weaponowned[wp_shotgun]=true;p->readyweapon=wp_shotgun;
+        p->pendingweapon=wp_nochange;p->ammo[am_shell]=20;
+        barrel=P_SpawnMobj(p->mo->x+96*FRACUNIT,p->mo->y,ONFLOORZ,MT_BARREL);
+        enemy=P_SpawnMobj(p->mo->x+192*FRACUNIT,p->mo->y,ONFLOORZ,MT_TROOP);
+        CHECK(!Bot_ShotBarrelSafe(p,enemy,&hazard));
+        CHECK(hazard==barrel);
+        CHECK(Bot_RunCorridorBlocked(p->mo,enemy->x,enemy->y));
+    }
+    puts("PASS: route and gunfire stop before a dangerous barrel chain");
     G_InitNew(sk_medium,1,6);p=&players[0];
     {
         plat_t plat;fixed_t x=0,y=0;sector_t *sec=&sectors[98];

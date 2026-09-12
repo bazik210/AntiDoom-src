@@ -178,6 +178,8 @@ static fixed_t run_goal_x, run_goal_y, run_goal_z;
 static fixed_t forced_item_x, forced_item_y;
 static int forced_item_until = 0;
 static boolean forced_item_active = false;
+static boolean goal_item_emergency = false;
+static int run_obstacle_since = 0;
 
 /* A normal USE door is a two-stage interaction: press it, then cross it.
    Planning items immediately after the press used to make the bot turn around
@@ -755,6 +757,34 @@ static boolean Bot_RunLinkGeometry(int start, int land)
     return true;
 }
 
+/* A momentum link describes geometry only. Do not start it through a live
+   monster or barrel: the atomic run controller cannot fight or brake safely. */
+static boolean Bot_RunCorridorBlocked(mobj_t *mo, fixed_t tx, fixed_t ty)
+{
+    thinker_t *th;
+    double dx=(double)tx-mo->x, dy=(double)ty-mo->y;
+    double length2=dx*dx+dy*dy;
+
+    if (length2 < FRACUNIT*(double)FRACUNIT) return false;
+    for (th=thinkercap.next;th!=&thinkercap;th=th->next) {
+        mobj_t *thing;
+        double along,px,py,clearance;
+        if (th->function.acp1!=(actionf_p1)P_MobjThinker) continue;
+        thing=(mobj_t*)th;
+        if (thing==mo || thing->player || thing->health<=0 ||
+            !(thing->flags&(MF_SOLID|MF_SHOOTABLE))) continue;
+        along=((double)(thing->x-mo->x)*dx+(double)(thing->y-mo->y)*dy)/length2;
+        if (along<=0.0 || along>=1.05) continue;
+        px=(double)mo->x+dx*along;
+        py=(double)mo->y+dy*along;
+        clearance=(double)(mo->radius+thing->radius+16*FRACUNIT);
+        if (fabs((double)thing->x-px)<clearance &&
+            fabs((double)thing->y-py)<clearance)
+            return true;
+    }
+    return false;
+}
+
 /* Mark the ordinary-walk component containing an otherwise unreachable item,
    then look backwards from its boundary for a reachable straight run-up.  This
    keeps expensive momentum-link discovery focused on useful unreachable items
@@ -875,13 +905,14 @@ static void Bot_Flood(player_t *player)
     static const int dx[8] = {1,-1,0,0,1,1,-1,-1};
     static const int dy[8] = {0,0,1,-1,1,-1,1,-1};
     int start, i;
-    boolean protect_ledge = (forced_item_active && leveltime < forced_item_until);
+    boolean protect_ledge = (map02_route || map04_crate_route) && forced_item_active &&
+                            leveltime < forced_item_until;
     Bot_RefreshGeometry();
     ++stamp; heap_count = 0;
     if (protect_ledge) {
         start = Bot_NearLedgeStart(player->mo);
-        if (start < 0)
-            start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
+        if (start < 0 && !map02_route)
+            start = Bot_NearCell(player->mo->x,player->mo->y,player->mo->z,false);
     } else {
         start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
     }
@@ -1381,6 +1412,9 @@ static boolean Bot_Candidate(bot_goaltype_t type, fixed_t x, fixed_t y, fixed_t 
     return true; /* reachable, even if another goal currently scores better */
 }
 
+static boolean Bot_HasRangedAmmo(player_t *p);
+static boolean Bot_RearmPickup(player_t *p, mobj_t *mo);
+
 /* Items are collected by touching them, not by standing at their origin.
    MAP02's red skull is exactly PLAYERRADIUS from a wall: BOT_RADIUS makes
    walking to that origin impossible even though the pickup lane is clear. */
@@ -1414,6 +1448,11 @@ static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
     if (best < 0) return false;
     if (best_dist + priority < goal.score) {
         goal.type = GO_ITEM;
+        goal_item_emergency =
+            (!Bot_HasRangedAmmo(p) && Bot_RearmPickup(p,item)) ||
+            (p->health <= 35 &&
+             (item->sprite==SPR_STIM || item->sprite==SPR_MEDI ||
+              item->sprite==SPR_SOUL || item->sprite==SPR_MEGA));
 
         /* x/y are the reachable pickup checkpoint.  aimx/aimy keep the real
            item origin for forced-item identity and diagnostics.  Keeping these
@@ -1615,6 +1654,21 @@ static void Bot_CheckPendingUse(void)
         line_used[pending_use_line] = leveltime;
         if (line_key_memory)
             line_key_memory[pending_use_line] = 0;
+
+        /* MAP02's red bars expose nine small faces with the same keyed action.
+           Once tag 7 starts, every face represents the completed same gate;
+           revisiting them one by one caused the closed-room oscillation. */
+        if (map02_route && Bot_Key(pending_use_special)==it_redcard) {
+            int sibling;
+            for (sibling=0;sibling<numlines;++sibling) {
+                if (lines[sibling].special==pending_use_special &&
+                    lines[sibling].tag==li->tag) {
+                    line_used[sibling]=leveltime ? leveltime : 1;
+                    line_retry[sibling]=leveltime+10*TICRATE;
+                    if (line_key_memory) line_key_memory[sibling]=0;
+                }
+            }
+        }
         Bot_ClearKeyProgressForSpecial(pending_use_special);
 
         /* MAP02: after opening the red-key bars, the nearby switch is the next
@@ -2012,6 +2066,7 @@ static void Bot_Plan(player_t *p)
     }
 
     goal.type = GO_NONE; goal.score = INF; goal.line = -1; path_len = path_step = 0;
+    goal_item_emergency = false;
 
     /* Hints use ordinary flood paths and validated USE approach points. */
     if (forced_progress_line >= 0) {
@@ -2026,8 +2081,15 @@ static void Bot_Plan(player_t *p)
     if (map03_route) {
         if (p->mo->x > 2780*FRACUNIT && p->mo->z >= 96*FRACUNIT)
             map03_platform_done = true;
-        if (!map03_platform_done)
-            story_target = 87;
+        if (!map03_platform_done) {
+            /* The first lift switch is behind the start-room door. Targeting
+               the lift directly made frontier exploration alternate between
+               the room's corners whenever that door closed or timed out. */
+            if (p->mo->x < 2100*FRACUNIT)
+                story_target = 322;
+            else
+                story_target = 87;
+        }
         else if (Bot_HasKey(p,0)) {
             if (line_used[map03_blue_door_left] ||
                 line_used[map03_blue_door_right])
@@ -2336,8 +2398,7 @@ static void Bot_Plan(player_t *p)
                    the switch recess/corner.  The old planner could walk to such
                    a point forever because reaching the staging point was
                    mistaken for being able to operate the linedef. */
-                if (!Bot_CanUsePoint(x,y,a,li) &&
-                    !(map03_route && i == story_target)) continue;
+                if (!Bot_CanUsePoint(x,y,a,li) && i != story_target) continue;
                 Bot_Candidate(GO_USE,x,y,ax,ay,i,priority);
             }
         } else if (Bot_WalkSpecial(special) && li->backsector) {
@@ -2407,6 +2468,14 @@ static void Bot_Plan(player_t *p)
             }
         }
     }
+    if (map04_route && map04_yellow_state==2 &&
+        story_target==map04_yellow_switch) {
+        /* The ordinary 40-unit switch offset hugs sector 113's diagonal wall
+           and leaves less than a player radius. Use its narrow centre lane. */
+        Bot_Candidate(GO_USE,-1712*FRACUNIT,1080*FRACUNIT,
+                      -1736*FRACUNIT,1080*FRACUNIT,
+                      map04_yellow_switch,-50000);
+    }
     for (th = thinkercap.next; th != &thinkercap; th = th->next) {
         mobj_t *mo;
         int priority;
@@ -2426,7 +2495,7 @@ static void Bot_Plan(player_t *p)
         }
         if (mo==generic_key && priority!=INF) priority=-45000;
         if (priority!=INF && priority>-10000 && mo!=generic_key &&
-            lift_commit_line<0 &&
+            lift_commit_line<0 && !forced_item_active &&
             P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<192*FRACUNIT &&
             abs(mo->z-p->mo->z)<32*FRACUNIT)
             priority-=35000;
@@ -2564,21 +2633,13 @@ static void Bot_Plan(player_t *p)
         !lift_commit_boarded)
         next_plan = leveltime + 18; /* moving floor can become reachable without flood-spamming */
     else if (goal.type == GO_NONE) {
-        static int none_goal_count = 0;
-        if (++none_goal_count > 6) {
-            if (forced_item_active) {
-                I_Log("Bot: clearing stale forced item watchdog\n");
-                forced_item_active = false;
-                forced_item_until = 0;
-            }
-            none_goal_count = 0;
-        }
         next_plan = leveltime + (forced_item_active ? 8 : 18);
     }
-    else if (forced_item_active && goal.type != GO_ITEM)
+    else if (forced_item_active && goal.type != GO_ITEM) {
         next_plan = leveltime + 12;
-    else
+    } else {
         next_plan = leveltime + 350;
+    }
 
     last_progress = leveltime; progress_dist = INF;
     I_Log("Bot: plan type=%d line=%d goal=(%d,%d) path=%d\n",goal.type,goal.line,goal.x/FRACUNIT,goal.y/FRACUNIT,path_len);
@@ -2679,6 +2740,7 @@ void Bot_InitLevel(void)
     progress_x = progress_y = 0;
     Bot_ClearLiftCommit();
     run_stamp = run_state = run_until = 0; failed_run_until = 0;
+    run_obstacle_since = 0;
     run_sx = run_sy = run_tx = run_ty = run_start_z = 0;
     run_goal_x = run_goal_y = run_goal_z = 0;
     forced_item_x = forced_item_y = 0; forced_item_until = 0; forced_item_active = false;
@@ -2774,6 +2836,70 @@ static mobj_t *Bot_BarrelTarget(player_t *p)
         if (useful) return barrels[root];
     }
     return NULL;
+}
+
+/* Reject a shot whose spread or impact can start a barrel chain close enough
+   to hurt the player. This checks shots aimed at monsters, not only deliberate
+   barrel targets. */
+static boolean Bot_ShotBarrelSafe(player_t *p, mobj_t *target,
+                                  mobj_t **nearest_hazard)
+{
+    mobj_t *barrels[128];
+    boolean chain[128]={false}, changed=true;
+    thinker_t *th;
+    double dx,dy,len,spread;
+    int count=0,i,j;
+    boolean safe=true;
+
+    if (nearest_hazard) *nearest_hazard=NULL;
+    if (!p || !p->mo || !target || target->type==MT_BARREL) return true;
+    dx=(double)(target->x-p->mo->x)/FRACUNIT;
+    dy=(double)(target->y-p->mo->y)/FRACUNIT;
+    len=sqrt(dx*dx+dy*dy);
+    if (len<1.0) return true;
+    spread=p->readyweapon==wp_bfg ? 1.1 :
+           p->readyweapon==wp_supershotgun ? 0.23 : 0.08;
+    for (th=thinkercap.next;th!=&thinkercap;th=th->next) {
+        mobj_t *m;
+        if (th->function.acp1!=(actionf_p1)P_MobjThinker) continue;
+        m=(mobj_t*)th;
+        if (m->type!=MT_BARREL || !(m->flags&MF_SHOOTABLE) || m->health<=0) continue;
+        if (count==128) return false;
+        barrels[count++]=m;
+    }
+    for (i=0;i<count;++i) {
+        double bx=(double)(barrels[i]->x-p->mo->x)/FRACUNIT;
+        double by=(double)(barrels[i]->y-p->mo->y)/FRACUNIT;
+        double along=(bx*dx+by*dy)/len;
+        double across=fabs(bx*dy-by*dx)/len;
+        if (along>=0.0 && along<=len+32.0 &&
+            across<=along*spread+(double)barrels[i]->radius/FRACUNIT+16.0)
+            chain[i]=true;
+        if ((p->readyweapon==wp_missile || p->readyweapon==wp_bfg) &&
+            P_AproxDistance(barrels[i]->x-target->x,
+                            barrels[i]->y-target->y)<160*FRACUNIT+barrels[i]->radius)
+            chain[i]=true;
+    }
+    while (changed) {
+        changed=false;
+        for (i=0;i<count;++i) if (chain[i]) {
+            for (j=0;j<count;++j) if (!chain[j] &&
+                P_AproxDistance(barrels[i]->x-barrels[j]->x,
+                                barrels[i]->y-barrels[j]->y)<128*FRACUNIT+barrels[j]->radius) {
+                chain[j]=true;changed=true;
+            }
+        }
+    }
+    for (i=0;i<count;++i) if (chain[i] &&
+        P_AproxDistance(barrels[i]->x-p->mo->x,
+                        barrels[i]->y-p->mo->y)<192*FRACUNIT+p->mo->radius) {
+        safe=false;
+        if (!nearest_hazard || !*nearest_hazard ||
+            P_AproxDistance(barrels[i]->x-p->mo->x,barrels[i]->y-p->mo->y)<
+            P_AproxDistance((*nearest_hazard)->x-p->mo->x,(*nearest_hazard)->y-p->mo->y))
+            if (nearest_hazard) *nearest_hazard=barrels[i];
+    }
+    return safe;
 }
 
 static mobj_t *Bot_Threat(player_t *p)
@@ -4166,9 +4292,11 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         I_Log("Bot: door commit timeout line=%d\n",expired_line);
         Bot_ClearDoorCommit();
 
-        /* A failed crossing may be required later; retry after three seconds. */
+        /* A door we successfully operated remains the way out of this room.
+           Retry immediately. Cooling it down made the bot
+           fill those seconds with tiny explore loops inside the sealed room. */
         if (expired_line >= 0 && expired_line < numlines)
-            line_retry[expired_line]=leveltime+3*TICRATE;
+            line_retry[expired_line]=0;
         next_plan=leveltime+1;
     }
 
@@ -4630,7 +4758,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     /* Closed-door operation stays atomic, but once the doorway is OPEN the bot
        must defend itself.  door_combat_window keeps the same door commit alive
        while allowing a real weapon trace to acquire monsters in the next room. */
-    if (ready_to_run || leveltime < exit_commit_until ||
+    if (leveltime < exit_commit_until ||
         ((exit_goal || door_waiting || (interaction_lock && !door_combat_window)) &&
          !(threat && (p->health <= 35 || nearby_attackers >= 3))))
         threat = NULL;
@@ -4650,13 +4778,14 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         fixed_t hismid = threat->z + threat->height/2;
         fixed_t dz = abs(hismid-mymid);
         boolean combat_moved = false;
+        mobj_t *barrel_hazard = NULL;
 
         boolean urgent = p->health <= 50 || nearby_attackers >= 3;
         boolean stable_shot = combat_visible_tics >= 3 || urgent;
         fixed_t item_dist = (goal.type == GO_ITEM) ?
             P_AproxDistance(goal.x - mo->x, goal.y - mo->y) : INF;
-        boolean nearby_item = (goal.type == GO_ITEM && item_dist < 192*FRACUNIT);
-        boolean supply_run = goal.type==GO_ITEM && (p->health<=70 || !ranged_ammo || nearby_item || goal.score < -25000);
+        boolean supply_run = goal.type==GO_ITEM && goal_item_emergency &&
+                             item_dist < 192*FRACUNIT;
         boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
@@ -4693,6 +4822,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 can_fire = false;
                 weapon_switch_until = 0;
             }
+            if (can_fire && !Bot_ShotBarrelSafe(p,threat,&barrel_hazard)) {
+                can_fire=false;
+                prefer_combat=true;
+            }
         } else {
             prefer_combat = false;
             can_fire = false;
@@ -4709,6 +4842,16 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 tx=retreatx; ty=retreaty;
                 stop=false;
                 combat_moved=true;
+            }
+        }
+
+        if (barrel_hazard && !combat_moved && !door_waiting && !lift_riding) {
+            fixed_t retreatx,retreaty;
+            if (Bot_FindHitscanRetreat(mo,barrel_hazard,ledge_protect,
+                                       &retreatx,&retreaty)) {
+                tx=retreatx;ty=retreaty;stop=false;combat_moved=true;
+            } else {
+                stop=true;combat_moved=true;
             }
         }
 
@@ -4854,9 +4997,12 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         aim = R_PointToAngle2(mo->x,mo->y,combat_last_x,combat_last_y);
         if (leveltime < combat_pause_until) stop = true;
         if (door_combat_window) {
-            stop = true;
-            door_cross = false;
-            door_fighting = true;
+            /* Last-known aim may be useful, but an open doorway must keep
+               crossing when the monster has slipped around its side. */
+            tx=door_tx; ty=door_ty;
+            stop=false;
+            door_cross=true;
+            door_fighting=false;
         }
         if (mlook) lookdir = 0;
     } else if (mlook) {
@@ -4896,7 +5042,25 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         next_door_combat_log = leveltime + TICRATE;
     }
 
+    if (ready_to_run &&
+        ((threat && combat_has_shot) || Bot_RunCorridorBlocked(mo,goal.aimx,goal.aimy))) {
+        stop=true;
+        ready_to_run=false;
+        if (threat && combat_has_shot) {
+            run_obstacle_since=0;
+        } else if (!run_obstacle_since) {
+            run_obstacle_since=leveltime;
+        } else if (leveltime-run_obstacle_since >= TICRATE) {
+            failed_run_sx=goal.x; failed_run_sy=goal.y;
+            failed_run_tx=goal.aimx; failed_run_ty=goal.aimy;
+            failed_run_until=leveltime+175;
+            goal.type=GO_NONE; path_len=path_step=0;
+            next_plan=leveltime+1;
+            run_obstacle_since=0;
+        }
+    }
     if (ready_to_run) {
+        run_obstacle_since=0;
         run_state = 1;
         run_until = leveltime + 70;
         run_sx = mo->x; run_sy = mo->y;

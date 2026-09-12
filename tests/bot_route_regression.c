@@ -97,6 +97,9 @@ int main(int argc, char **argv)
         }
         printf("BARS t=%d xy=%d,%d goal=%d/%d\n",t,mo->x/FRACUNIT,mo->y/FRACUNIT,goal.type,goal.line);
         CHECK(!lines[311].special);
+        for (t=0;t<numlines;++t)
+            if (lines[t].special==135 && lines[t].tag==7)
+                CHECK(line_used[t]);
         puts("PASS: red bars -> follow-up button within eight seconds");
         {
             mobj_t *enemy=NULL;
@@ -172,6 +175,10 @@ int main(int argc, char **argv)
         puts("PASS: falling without red key restores lift objective");
     }
     } }
+    G_InitNew(skill,1,3);
+    Bot_BuildTiccmd(&players[0].cmd,&players[0]);
+    CHECK(goal.line==322);
+    puts("PASS: MAP03 start room targets its door before the lift");
     G_InitNew(skill,1,3);
     {
         player_t *p=&players[0]; mobj_t *mo=p->mo;
