@@ -102,6 +102,7 @@ static int lift_commit_sector = -1; /* used for tag-0/local lifts */
 static int lift_commit_until = 0;
 static boolean lift_commit_boarded = false;
 static fixed_t lift_commit_target_x = 0, lift_commit_target_y = 0;
+static fixed_t lift_commit_call_z = 0;
 static boolean map03_route = false;
 static boolean map03_platform_done = false;
 static boolean map03_teleport_done = false;
@@ -1087,6 +1088,7 @@ static void Bot_ClearLiftCommit(void)
     lift_commit_until = 0;
     lift_commit_boarded = false;
     lift_commit_target_x = lift_commit_target_y = 0;
+    lift_commit_call_z = 0;
 
 }
 
@@ -1145,6 +1147,7 @@ static void Bot_StartLiftCommit(mobj_t *mo, int line_index)
     lift_commit_tag=li->tag;
     lift_commit_sector=-1;
     lift_commit_boarded=false;
+    lift_commit_call_z = li->frontsector ? li->frontsector->floorheight : (mo ? mo->floorz : 0);
 
     /* Slow lifts may travel, wait three seconds, then travel again. Give the
        complete call->board->ride transaction enough time instead of treating
@@ -1215,6 +1218,7 @@ static boolean Bot_LiftCommitGoal(player_t *p)
         if (cells[i].stamp == stamp && cells[i].dist < INF && cells[i].clear) {
             int score=cells[i].dist;
             if (!cells[i].comfortable) score += 48;
+            if (!Bot_PlatformInterior(&sectors[sec], Bot_X(i), Bot_Y(i))) score += 2000;
             if (score < best_platform_score) {
                 best_platform_score=score;
                 best_platform=i;
@@ -1814,6 +1818,11 @@ static int Bot_Map06Route(player_t *p)
         int sec = (int)(p->mo->subsector->sector - sectors);
         if (sec == 120) return -1;
         if (sec == 101 || sec == 102 || sec == 124) return 355;
+        if (!Bot_HasKey(p, it_redcard)) {
+            if ((sec == 149 && sectors[149].floorheight <= 10*FRACUNIT) || sec == 150) {
+                return 564;
+            }
+        }
     }
     return Bot_GenericProgress(p);
 }
@@ -3749,44 +3758,68 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                     lift_commit_boarded && lift_commit_target_x &&
                     P_AproxDistance(mo->x-lift_commit_target_x,
                                     mo->y-lift_commit_target_y) <= 48*FRACUNIT)) {
-            lift_commit_boarded=true;
-
-            if (sectors[cursec].specialdata ||
-                (map04_route && lift_commit_line == 408 && sectors[38].specialdata)) {
-                /* Platform is still lowering/waiting/rising. Stay aboard. */
-                lift_riding=true;
-            } else {
-                /* The thinker finished while the player is still on its floor:
-                   the ride reached its terminal height. */
-                I_Log("Bot: lift ride complete line=%d sector=%d\n",
-                      lift_commit_line,cursec);
-
-                /* The thinker is finished and the player is on the terminal
-                   floor. Do not leave the MAP03 progression flag behind,
-                   otherwise the post-lift guard can keep the bot in
-                   lift_riding and combat/evade mode forever. */
-                if (map03_route) {
-                    /* Finishing the mover on sector 14 is not disembarking.
-                       Keep steering to sector 13 before releasing the ride. */
-                    if (lift_commit_tag != 3)
-                        map03_platform_done = true;
-                    lift_riding = false;
-                    if (lift_commit_line == 498)
-                        map03_final_lift_done = true;
+            plat_t *plat = NULL;
+            int p_i;
+            for (p_i = 0; p_i < MAXPLATS; ++p_i) {
+                if (activeplats[p_i] && activeplats[p_i]->sector == &sectors[cursec]) {
+                    plat = activeplats[p_i];
+                    break;
                 }
-                if (map04_route && lift_commit_tag == 15) {
-                    map04_lift_done = true;
-                    lift_riding = false;
+            }
+            lift_commit_boarded = true;
+
+            {
+                boolean is_descending = plat && (lift_commit_call_z >= plat->high - 32*FRACUNIT);
+                boolean ride_complete = false;
+
+                if (!sectors[cursec].specialdata &&
+                    !(map04_route && lift_commit_line == 408 && sectors[38].specialdata)) {
+                    ride_complete = true;
+                } else if (is_descending && (plat->sector->floorheight <= plat->low + 4*FRACUNIT || plat->status == waiting)) {
+                    ride_complete = true;
                 }
 
-                Bot_ClearLiftCommit();
+                if (!ride_complete) {
+                    /* Platform is still lowering/waiting/rising. Stay aboard. */
+                    lift_riding = true;
+                } else {
+                    /* The thinker finished or descending lift arrived at bottom */
+                    I_Log("Bot: lift ride complete line=%d sector=%d\n",
+                          lift_commit_line,cursec);
+                    if (lift_commit_line >= 0 && lift_commit_line < numlines) {
+                        line_used[lift_commit_line] = leveltime ? leveltime : 1;
+                        line_retry[lift_commit_line] = leveltime + 10*TICRATE;
+                    }
 
-                /* The old lift target points back to the platform. Discard it
-                   so the next plan can choose the upper room or the way back. */
-                goal.type=GO_NONE;
-                goal.line=-1;
-                path_len=path_step=0;
-                next_plan=0;
+                    /* The thinker is finished and the player is on the terminal
+                       floor. Do not leave the MAP03 progression flag behind,
+                       otherwise the post-lift guard can keep the bot in
+                       lift_riding and combat/evade mode forever. */
+                    if (map03_route) {
+                        /* Finishing the mover on sector 14 is not disembarking.
+                           Keep steering to sector 13 before releasing the ride. */
+                        if (lift_commit_tag != 3)
+                            map03_platform_done = true;
+                        lift_riding = false;
+                        if (lift_commit_line == 498)
+                            map03_final_lift_done = true;
+                    }
+                    if (map04_route && lift_commit_tag == 15) {
+                        map04_lift_done = true;
+                        lift_riding = false;
+                    }
+
+                    Bot_ClearLiftCommit();
+                    generic_lift = false;
+                    lift_riding = false;
+
+                    /* The old lift target points back to the platform. Discard it
+                       so the next plan can choose the upper room or the way back. */
+                    goal.type=GO_NONE;
+                    goal.line=-1;
+                    path_len=path_step=0;
+                    next_plan=0;
+                }
             }
         }
     }
@@ -3837,7 +3870,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 } else if (story_target >= 0) {
                     gfloor = lines[story_target].frontsector->floorheight;
                 }
-                descending = (gfloor <= plat->low + 24*FRACUNIT) || !Bot_PlatformHasUpperExit(plat);
+                descending = (gfloor <= plat->low + 24*FRACUNIT) || !Bot_PlatformHasUpperExit(plat) || (lift_commit_call_z >= plat->high - 32*FRACUNIT);
             }
             lift_riding = descending ? plat->sector->floorheight > plat->low :
                                        plat->sector->floorheight < plat->high;
