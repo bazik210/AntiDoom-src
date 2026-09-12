@@ -3339,12 +3339,24 @@ static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
     cmd->forwardmove = 50;
     cmd->sidemove = 0;
 
-    /* Near the landing in XY is not a landing: the player may still be above
-       the gap. Hand control back only after reaching supported floor. */
-    if ((dist < ((campaign_hint && campaign_hint->map == 6) ? 80 : (map04_crate_route ? 8 : 20))*FRACUNIT ||
-         (campaign_hint && campaign_hint->map == 6 && mo->subsector->sector == &sectors[120])) && mo->z <= mo->floorz &&
-        (mo->floorz >= run_start_z-24*FRACUNIT || (campaign_hint && campaign_hint->map == 6)) &&
-        R_PointInSubsector(mo->x,mo->y)->sector->floorheight >= mo->floorz-24*FRACUNIT) {
+    /* Dynamic sector-based landing check:
+       A landing is only valid once the player has actually left the launch sector,
+       is standing on the landing/goal sector (or within close radius), and has
+       feet firmly on supported floor. */
+    sector_t *start_sec = R_PointInSubsector(run_sx, run_sy)->sector;
+    sector_t *land_sec = R_PointInSubsector(run_tx, run_ty)->sector;
+    sector_t *goal_sec = R_PointInSubsector(run_goal_x, run_goal_y)->sector;
+    sector_t *cur_sec = mo->subsector->sector;
+    fixed_t min_landing_floor = land_sec ? land_sec->floorheight : mo->floorz;
+    if (goal_sec && goal_sec->floorheight < min_landing_floor)
+        min_landing_floor = goal_sec->floorheight;
+
+    boolean on_target_sec = (cur_sec != start_sec) &&
+        (cur_sec == land_sec || cur_sec == goal_sec || dist < (map04_crate_route ? 8 : 24)*FRACUNIT);
+    boolean feet_on_ground = (mo->z <= mo->floorz + FRACUNIT) &&
+        (mo->floorz >= min_landing_floor - 24*FRACUNIT);
+
+    if (on_target_sec && feet_on_ground) {
         run_state = 0;
         goal.type = GO_NONE;
         /* Keep the original off-mesh objective sticky long enough to walk the
@@ -3365,7 +3377,7 @@ static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
     }
 
     if (leveltime >= run_until ||
-        (!(campaign_hint && campaign_hint->map == 6) && mo->z < run_start_z-64*FRACUNIT && dist > 32*FRACUNIT)) {
+        (mo->z < min_landing_floor - 32*FRACUNIT && dist > 32*FRACUNIT)) {
         failed_run_sx=run_sx; failed_run_sy=run_sy;
         failed_run_tx=run_tx; failed_run_ty=run_ty;
         failed_run_until=leveltime+175;
