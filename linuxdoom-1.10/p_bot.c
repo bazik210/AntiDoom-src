@@ -1072,18 +1072,47 @@ static boolean Bot_PlatformHasUpperExit(plat_t *plat)
     return false;
 }
 
+static boolean Bot_SectorCenter(sector_t *sec, fixed_t *tx, fixed_t *ty)
+{
+    int i, dx, dy, best=INF;
+    fixed_t minx=INF, miny=INF, maxx=-INF, maxy=-INF;
+    fixed_t cx, cy;
+
+    if (!sec) return false;
+
+    for (i=0; i<sec->linecount; ++i) {
+        line_t *li = sec->lines[i];
+        if (li->v1->x < minx) minx = li->v1->x;
+        if (li->v1->x > maxx) maxx = li->v1->x;
+        if (li->v1->y < miny) miny = li->v1->y;
+        if (li->v1->y > maxy) maxy = li->v1->y;
+        if (li->v2->x < minx) minx = li->v2->x;
+        if (li->v2->x > maxx) maxx = li->v2->x;
+        if (li->v2->y < miny) miny = li->v2->y;
+        if (li->v2->y > maxy) maxy = li->v2->y;
+    }
+    cx = (minx + maxx) / 2;
+    cy = (miny + maxy) / 2;
+
+    if (Bot_PlatformInterior(sec, cx, cy)) {
+        *tx = cx; *ty = cy;
+        return true;
+    }
+
+    for (dy=-96; dy<=96; dy+=8) for (dx=-96; dx<=96; dx+=8) {
+        fixed_t x = cx + dx*FRACUNIT, y = cy + dy*FRACUNIT;
+        int score = abs(dx) + abs(dy);
+        if (score >= best || !Bot_PlatformInterior(sec, x, y)) continue;
+        best = score; *tx = x; *ty = y;
+    }
+    return best < INF;
+}
+
 static boolean Bot_PlatformCenter(mobj_t *mo, plat_t *plat, fixed_t *tx, fixed_t *ty)
 {
-    int dx,dy,best=INF;
-    for (dy=-96;dy<=96;dy+=8) for (dx=-96;dx<=96;dx+=8) {
-        fixed_t x=mo->x+dx*FRACUNIT, y=mo->y+dy*FRACUNIT;
-        int score=abs(dx)+abs(dy);
-        if (score>=best || !Bot_PlatformInterior(plat->sector,x,y)) continue;
-        if (!Bot_Walk(mo->x,mo->y,mo->z,x,y,mo,false) ||
-            probe.ceiling < plat->high+mo->height) continue;
-        best=score; *tx=x; *ty=y;
-    }
-    return best<INF;
+    if (!plat || !plat->sector) return false;
+    if (plat->sector->ceilingheight < plat->high + mo->height) return false;
+    return Bot_SectorCenter(plat->sector, tx, ty);
 }
 
 static boolean Bot_LiftUseSpecial(int s)
@@ -1250,11 +1279,19 @@ static boolean Bot_LiftCommitGoal(player_t *p)
     }
 
     if (best_platform >= 0) {
-        lift_commit_target_x=Bot_X(best_platform);
-        lift_commit_target_y=Bot_Y(best_platform);
+        fixed_t cx = Bot_X(best_platform);
+        fixed_t cy = Bot_Y(best_platform);
+        int sec = cells[best_platform].sector;
+        if (sec >= 0 && sec < numsectors && Bot_SectorCenter(&sectors[sec], &cx, &cy)) {
+            int ccell = Bot_NearCell(cx, cy, 0, true);
+            if (ccell >= 0 && cells[ccell].clear)
+                best_platform = ccell;
+        }
+        lift_commit_target_x=cx;
+        lift_commit_target_y=cy;
         goal.type=GO_WALK;
-        goal.x=Bot_X(best_platform);
-        goal.y=Bot_Y(best_platform);
+        goal.x=cx;
+        goal.y=cy;
         goal.aimx=goal.x; goal.aimy=goal.y;
         goal.line=-1;
         goal.cell=best_platform;
@@ -1353,7 +1390,7 @@ static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
     int gx = (item->x-orgx + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
     int gy = (item->y-orgy + GRID*FRACUNIT/2) / (GRID*FRACUNIT);
     int dx, dy, reach, best = -1, best_dist = INF;
-    boolean protect_ledge = forced_item_active && leveltime < forced_item_until;
+    boolean protect_ledge = map02_route && forced_item_active && leveltime < forced_item_until;
 
     /* Stay well inside Doom's square touch range, including waypoint error.
        The final precision approach uses the same 20-unit pickup envelope. */
@@ -1464,39 +1501,44 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_SUIT:
             return !p->powers[pw_ironfeet] ? -800 : INF;
 
-        case SPR_ARM1: case SPR_ARM2:
-            return p->armorpoints < 100 ? -1400 : INF;
+        case SPR_ARM1: return p->armorpoints < 100 ? -1400 : INF;
+        case SPR_ARM2: return p->armorpoints < 200 ? -2400 : INF;
 
         /* === РџР°С‚СЂРѕРЅС‹ вЂ” С‚РµРїРµСЂСЊ РїРѕРґР±РёСЂР°РµРј Р·Р°СЂР°РЅРµРµ === */
         case SPR_CLIP: case SPR_AMMO:
             if (p->ammo[am_clip] < 20) return -25000;
             if (p->ammo[am_clip] < 50) return -1800;
-            if (p->ammo[am_clip] < 100) return -600;
+            if (p->ammo[am_clip] < p->maxammo[am_clip]) return -600;
             return INF;
 
         case SPR_SHEL: case SPR_SBOX:
             if (!p->weaponowned[wp_shotgun] && !p->weaponowned[wp_supershotgun]) return INF;
             if (p->ammo[am_shell] < 8) return -25000;
             if (p->ammo[am_shell] < 24) return -1800;
-            if (p->ammo[am_shell] < 48) return -700;
+            if (p->ammo[am_shell] < p->maxammo[am_shell]) return -700;
             return INF;
 
         case SPR_CELL: case SPR_CELP:
             if (!p->weaponowned[wp_plasma] && !p->weaponowned[wp_bfg]) return INF;
             if (p->ammo[am_cell] < 40) return -25000;
             if (p->ammo[am_cell] < 100) return -1800;
-            if (p->ammo[am_cell] < 200) return -600;
+            if (p->ammo[am_cell] < p->maxammo[am_cell]) return -600;
             return INF;
 
         case SPR_ROCK: case SPR_BROK:
             if (!p->weaponowned[wp_missile]) return INF;
             if (p->ammo[am_misl] < 4) return -25000;
             if (p->ammo[am_misl] < 10) return -1800;
-            if (p->ammo[am_misl] < 20) return -500;
+            if (p->ammo[am_misl] < p->maxammo[am_misl]) return -500;
             return INF;
 
         case SPR_BPAK:
-            return !p->backpack ? -900 : INF;
+            if (!p->backpack) return -12000;
+            if (p->ammo[am_clip] < p->maxammo[am_clip] ||
+                p->ammo[am_shell] < p->maxammo[am_shell] ||
+                p->ammo[am_cell] < p->maxammo[am_cell] ||
+                p->ammo[am_misl] < p->maxammo[am_misl]) return -1800;
+            return INF;
     }
     return INF;
 }
@@ -2384,7 +2426,7 @@ static void Bot_Plan(player_t *p)
         }
         if (mo==generic_key && priority!=INF) priority=-45000;
         if (priority!=INF && priority>-10000 && mo!=generic_key &&
-            lift_commit_line<0 && !forced_item_active &&
+            lift_commit_line<0 &&
             P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<192*FRACUNIT &&
             abs(mo->z-p->mo->z)<32*FRACUNIT)
             priority-=35000;
@@ -2404,9 +2446,11 @@ static void Bot_Plan(player_t *p)
                 forced_seen = true;
                 forced_item_until = leveltime + 2100;
             }
+            boolean nearby_incidental = (P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<192*FRACUNIT &&
+                                         abs(mo->z-p->mo->z)<24*FRACUNIT);
             if ((leveltime < post_use_local_until || key_progress ||
                  (lift_commit_line >= 0 && leveltime < lift_commit_until)) &&
-                !forced_item_active) {
+                !forced_item_active && !nearby_incidental) {
                 /* After a switch OR while finishing newly unlocked key
                    progression, do not abandon the route for ordinary ammo,
                    armor or routine health. Keys, major weapons and critical
@@ -3938,7 +3982,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 if (!sectors[cursec].specialdata &&
                     !(map04_route && lift_commit_line == 408 && sectors[38].specialdata)) {
                     ride_complete = true;
-                } else if (is_descending && (plat->sector->floorheight <= plat->low + 4*FRACUNIT || plat->status == waiting)) {
+                } else if (is_descending && plat->sector->floorheight <= plat->low + 4*FRACUNIT) {
+                    ride_complete = true;
+                } else if (!is_descending && plat->sector->floorheight >= plat->high - 4*FRACUNIT) {
                     ride_complete = true;
                 }
 
@@ -4033,10 +4079,12 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 } else if (story_target >= 0) {
                     gfloor = lines[story_target].frontsector->floorheight;
                 }
-                descending = (gfloor <= plat->low + 24*FRACUNIT) || !Bot_PlatformHasUpperExit(plat) || (lift_commit_call_z >= plat->high - 32*FRACUNIT);
+                descending = (lift_commit_line >= 0) ?
+                    (lift_commit_call_z >= plat->high - 32*FRACUNIT) :
+                    ((mo->z >= plat->high - 32*FRACUNIT) || (gfloor <= plat->low + 24*FRACUNIT) || !Bot_PlatformHasUpperExit(plat));
             }
-            lift_riding = descending ? plat->sector->floorheight > plat->low :
-                                       plat->sector->floorheight < plat->high;
+            lift_riding = descending ? (plat->sector->floorheight > plat->low + 4*FRACUNIT) :
+                                       (plat->sector->floorheight < plat->high - 4*FRACUNIT);
             if (campaign_hint && campaign_hint->map == 6 && plat->sector == &sectors[122] &&
                 !Bot_HasKey(p, it_bluecard) && Bot_Map06HasPillarBlue()) {
                 if (plat->sector->floorheight >= 32*FRACUNIT) {
@@ -4064,10 +4112,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 generic_lift=true;
                 depart_lift_sector=plat->sector-sectors;
                 lift_x=mo->x; lift_y=mo->y;
-                if (!Bot_PlatformInterior(plat->sector,mo->x,mo->y) ||
-                    !Bot_Position(mo->x,mo->y,mo,false,NULL) ||
-                    probe.ceiling < plat->high+mo->height)
-                    Bot_PlatformCenter(mo,plat,&lift_x,&lift_y);
+                Bot_PlatformCenter(mo,plat,&lift_x,&lift_y);
             } else {
                 if (lift_commit_boarded) { Bot_ClearLiftCommit(); next_plan=0; }
                 if (generic_lift) { generic_lift=false; next_plan=0; }
@@ -4173,7 +4218,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding &&
         leveltime >= combat_pause_until)
         Bot_Plan(p);
-    ledge_protect = (forced_item_active && leveltime < forced_item_until &&
+    ledge_protect = (map02_route && forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
                      P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
 
@@ -4608,7 +4653,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
         boolean urgent = p->health <= 50 || nearby_attackers >= 3;
         boolean stable_shot = combat_visible_tics >= 3 || urgent;
-        boolean supply_run = goal.type==GO_ITEM && (p->health<=50 || !ranged_ammo);
+        fixed_t item_dist = (goal.type == GO_ITEM) ?
+            P_AproxDistance(goal.x - mo->x, goal.y - mo->y) : INF;
+        boolean nearby_item = (goal.type == GO_ITEM && item_dist < 192*FRACUNIT);
+        boolean supply_run = goal.type==GO_ITEM && (p->health<=70 || !ranged_ammo || nearby_item || goal.score < -25000);
         boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
@@ -5091,8 +5139,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     } else stuck_since=0;
     if (lift_riding) {
         if (generic_lift) {
-            Bot_MoveEx(cmd,mo,lift_x,lift_y,
-                P_AproxDistance(lift_x-mo->x,lift_y-mo->y)<FRACUNIT,3.0);
+            boolean centered = P_AproxDistance(lift_x-mo->x,lift_y-mo->y) < 16*FRACUNIT;
+            Bot_MoveEx(cmd,mo,lift_x,lift_y,centered,2.5);
             return;
         }
         /* Steer toward the known landing in world coordinates, including while
