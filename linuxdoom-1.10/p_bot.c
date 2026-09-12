@@ -658,6 +658,29 @@ static int Bot_NearLedgeStart(mobj_t *mo)
         }
     }
 
+    if (best < 0) {
+        /* On a narrow pillar or platform edge, no cell may have 15-unit margins
+           in all 8 directions. Fall back to finding the nearest stable cell on our floor. */
+        for (dy=-4; dy<=4; ++dy) for (dx=-4; dx<=4; ++dx) {
+            int nx=gx+dx, ny=gy+dy, c, score;
+
+            if (nx<0 || ny<0 || nx>=width || ny>=height) continue;
+            c=ny*width+nx;
+            if (!Bot_Cell(c)) continue;
+            if (abs(cells[c].floor-mo->z) > 24*FRACUNIT) continue;
+
+            if (!Bot_WalkStable(mo->x,mo->y,mo->z,
+                                Bot_X(c),Bot_Y(c),mo,false))
+                continue;
+
+            score=P_AproxDistance(mo->x-Bot_X(c),mo->y-Bot_Y(c))/FRACUNIT;
+            if (score < bestscore) {
+                bestscore=score;
+                best=c;
+            }
+        }
+    }
+
     return best;
 }
 
@@ -855,14 +878,14 @@ static void Bot_Flood(player_t *player)
     boolean protect_ledge = (forced_item_active && leveltime < forced_item_until);
     Bot_RefreshGeometry();
     ++stamp; heap_count = 0;
-    if (protect_ledge)
+    if (protect_ledge) {
         start = Bot_NearLedgeStart(player->mo);
-    else
+        if (start < 0)
+            start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
+    } else {
         start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
+    }
 
-    /* Do not fall back to an ordinary, drop-permitting start during precision
-       traversal. A transient off-grid position is better handled by a quick
-       retry than by constructing a path whose very first edge is unusable. */
     if (start < 0) return;
     cells[start].dist = 0; heap[heap_count++] = start; cells[start].heap = 0;
     while (heap_count) {
@@ -1418,13 +1441,28 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_BON2: return p->armorpoints < 200 ? -200 : INF;
         case SPR_STIM: case SPR_MEDI:
             if (p->health >= 100) return INF;
-            if (p->health < 40) return -10000;
+            if (p->health < 40) return -28000;
+            if (p->health < 75) return -4000;
             return -1800;
 
         case SPR_SOUL: case SPR_MEGA:
             if (p->health < 50) return -40000;
             if (p->health < 100) return -35000;
-            return p->health < 190 ? -32000 : INF;
+            return p->health < 200 ? -32000 : INF;
+
+        case SPR_PINV:
+            return !p->powers[pw_invulnerability] ? -38000 : INF;
+
+        case SPR_PSTR:
+            return p->health < 100 ? (p->health < 50 ? -35000 : -18000) : INF;
+
+        case SPR_PINS:
+            if (p->powers[pw_invisibility]) return INF;
+            if (nearby_attackers > 0 || combat_target != NULL) return -26000;
+            return -2200;
+
+        case SPR_SUIT:
+            return !p->powers[pw_ironfeet] ? -800 : INF;
 
         case SPR_ARM1: case SPR_ARM2:
             return p->armorpoints < 100 ? -1400 : INF;
@@ -1432,27 +1470,29 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         /* === РџР°С‚СЂРѕРЅС‹ вЂ” С‚РµРїРµСЂСЊ РїРѕРґР±РёСЂР°РµРј Р·Р°СЂР°РЅРµРµ === */
         case SPR_CLIP: case SPR_AMMO:
             if (p->ammo[am_clip] < 20) return -25000;
-            if (p->ammo[am_clip] < 50) return -1600;   // Р±С‹Р»Рѕ 30
-            if (p->ammo[am_clip] < 100) return -600;   // РґР°Р¶Рµ РєРѕРіРґР° СЃСЂРµРґРЅРµ вЂ” РІСЃС‘ СЂР°РІРЅРѕ РїРѕР»РµР·РЅРѕ
+            if (p->ammo[am_clip] < 50) return -1800;
+            if (p->ammo[am_clip] < 100) return -600;
             return INF;
 
         case SPR_SHEL: case SPR_SBOX:
             if (!p->weaponowned[wp_shotgun] && !p->weaponowned[wp_supershotgun]) return INF;
-            if (p->ammo[am_shell] < 4) return -25000;
-            if (p->ammo[am_shell] < 20) return -1800;
-            if (p->ammo[am_shell] < 40) return -700;
+            if (p->ammo[am_shell] < 8) return -25000;
+            if (p->ammo[am_shell] < 24) return -1800;
+            if (p->ammo[am_shell] < 48) return -700;
             return INF;
 
         case SPR_CELL: case SPR_CELP:
             if (!p->weaponowned[wp_plasma] && !p->weaponowned[wp_bfg]) return INF;
-            if (p->ammo[am_cell] < 60) return -1600;
-            if (p->ammo[am_cell] < 120) return -600;
+            if (p->ammo[am_cell] < 40) return -25000;
+            if (p->ammo[am_cell] < 100) return -1800;
+            if (p->ammo[am_cell] < 200) return -600;
             return INF;
 
         case SPR_ROCK: case SPR_BROK:
             if (!p->weaponowned[wp_missile]) return INF;
-            if (p->ammo[am_misl] < 6) return -1200;
-            if (p->ammo[am_misl] < 12) return -500;
+            if (p->ammo[am_misl] < 4) return -25000;
+            if (p->ammo[am_misl] < 10) return -1800;
+            if (p->ammo[am_misl] < 20) return -500;
             return INF;
 
         case SPR_BPAK:
@@ -2479,8 +2519,18 @@ static void Bot_Plan(player_t *p)
     if (lift_commit_line >= 0 && leveltime < lift_commit_until &&
         !lift_commit_boarded)
         next_plan = leveltime + 18; /* moving floor can become reachable without flood-spamming */
-    else if (goal.type == GO_NONE)
+    else if (goal.type == GO_NONE) {
+        static int none_goal_count = 0;
+        if (++none_goal_count > 6) {
+            if (forced_item_active) {
+                I_Log("Bot: clearing stale forced item watchdog\n");
+                forced_item_active = false;
+                forced_item_until = 0;
+            }
+            none_goal_count = 0;
+        }
         next_plan = leveltime + (forced_item_active ? 8 : 18);
+    }
     else if (forced_item_active && goal.type != GO_ITEM)
         next_plan = leveltime + 12;
     else
@@ -3109,6 +3159,87 @@ static boolean Bot_RocketLaneSafe(mobj_t *mo, mobj_t *enemy, fixed_t dist)
     return Bot_WalkStable(mo->x,mo->y,mo->z,tx,ty,mo,false);
 }
 
+typedef struct {
+    fixed_t box[4];
+    fixed_t z;
+    fixed_t height;
+    boolean blocked;
+} bot_proj_probe_t;
+
+static bot_proj_probe_t proj_probe;
+
+static boolean Bot_ProjProbeLine(line_t *li)
+{
+    if (proj_probe.box[BOXRIGHT] <= li->bbox[BOXLEFT] ||
+        proj_probe.box[BOXLEFT] >= li->bbox[BOXRIGHT] ||
+        proj_probe.box[BOXTOP] <= li->bbox[BOXBOTTOM] ||
+        proj_probe.box[BOXBOTTOM] >= li->bbox[BOXTOP] ||
+        P_BoxOnLineSide(proj_probe.box, li) != -1) return true;
+
+    if (!li->backsector) {
+        proj_probe.blocked = true;
+        return false;
+    }
+
+    P_LineOpening(li);
+    if (opentop - openbottom < proj_probe.height ||
+        proj_probe.z + proj_probe.height > opentop ||
+        proj_probe.z < openbottom) {
+        proj_probe.blocked = true;
+        return false;
+    }
+    return true;
+}
+
+static boolean Bot_ProjectileClearance(player_t *p, angle_t shot, fixed_t radius, fixed_t dist)
+{
+    int i, steps;
+    fixed_t cos_a = finecosine[shot >> ANGLETOFINESHIFT];
+    fixed_t sin_a = finesine[shot >> ANGLETOFINESHIFT];
+    fixed_t pz = p->mo->z + 32 * FRACUNIT;
+    fixed_t height = (p->readyweapon == wp_bfg) ? 16*FRACUNIT : 8*FRACUNIT;
+
+    proj_probe.z = pz;
+    proj_probe.height = height;
+
+    steps = (dist / FRACUNIT) / 16;
+    if (steps < 2) steps = 2;
+    if (steps > 10) steps = 10;
+
+    for (i = 1; i <= steps; ++i) {
+        fixed_t d = (i == 1) ? 12 * FRACUNIT : (i * 16 * FRACUNIT);
+        fixed_t cx = p->mo->x + FixedMul(d, cos_a);
+        fixed_t cy = p->mo->y + FixedMul(d, sin_a);
+        int xl, xh, yl, yh, bx, by;
+
+        proj_probe.box[BOXLEFT] = cx - radius;
+        proj_probe.box[BOXRIGHT] = cx + radius;
+        proj_probe.box[BOXBOTTOM] = cy - radius;
+        proj_probe.box[BOXTOP] = cy + radius;
+        proj_probe.blocked = false;
+
+        xl = (proj_probe.box[BOXLEFT] - bmaporgx) >> MAPBLOCKSHIFT;
+        xh = (proj_probe.box[BOXRIGHT] - bmaporgx) >> MAPBLOCKSHIFT;
+        yl = (proj_probe.box[BOXBOTTOM] - bmaporgy) >> MAPBLOCKSHIFT;
+        yh = (proj_probe.box[BOXTOP] - bmaporgy) >> MAPBLOCKSHIFT;
+        if (xl < 0) xl = 0;
+        if (xh >= bmapwidth) xh = bmapwidth - 1;
+        if (yl < 0) yl = 0;
+        if (yh >= bmapheight) yh = bmapheight - 1;
+        if (xl > xh || yl > yh) continue;
+
+        ++validcount;
+        for (by = yl; by <= yh; ++by) {
+            for (bx = xl; bx <= xh; ++bx) {
+                if (!P_BlockLinesIterator(bx, by, Bot_ProjProbeLine))
+                    return false;
+            }
+        }
+        if (proj_probe.blocked) return false;
+    }
+    return true;
+}
+
 static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 {
     weapontype_t best = wp_fist;
@@ -3132,14 +3263,33 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
         if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2) best = wp_supershotgun;
     }
 
-    if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 &&
-        Bot_RocketLaneSafe(p->mo,enemy,dist)) best = wp_missile;
-    if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0) best = wp_plasma;
-    else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40) best = wp_bfg;
+    angle_t enemy_ang = enemy ? R_PointToAngle2(p->mo->x, p->mo->y, enemy->x, enemy->y) : p->mo->angle;
+    boolean plasma_clear = Bot_ProjectileClearance(p, enemy_ang, 14*FRACUNIT, 56*FRACUNIT);
+    boolean bfg_clear = Bot_ProjectileClearance(p, enemy_ang, 22*FRACUNIT, 80*FRACUNIT);
+    boolean rocket_clear = Bot_RocketLaneSafe(p->mo, enemy, dist) &&
+                           Bot_ProjectileClearance(p, enemy_ang, 16*FRACUNIT, 160*FRACUNIT);
+
+    if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && rocket_clear)
+        best = wp_missile;
+    if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0 && plasma_clear)
+        best = wp_plasma;
+    else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40 && bfg_clear)
+        best = wp_bfg;
     if (campaign_hint && (campaign_hint->flags&BOT_HINT_ICON) && enemy &&
         enemy->type==MT_BOSSBRAIN && p->weaponowned[wp_missile] &&
         p->ammo[am_misl]>0)
         best=wp_missile;
+
+    /* If clearance rejected projectiles, but we have NO hitscan ammo:
+       Never fall back to bare fists or chainsaw! Keep the heavy weapon raised! */
+    if (best == wp_fist || best == wp_chainsaw) {
+        if (p->weaponowned[wp_plasma] && p->ammo[am_cell] > 0)
+            best = wp_plasma;
+        else if (p->weaponowned[wp_bfg] && p->ammo[am_cell] >= 40)
+            best = wp_bfg;
+        else if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && dist > 192*FRACUNIT)
+            best = wp_missile;
+    }
 
     cur_ammo = weaponinfo[p->readyweapon].ammo;
     cur_needed = p->readyweapon == wp_bfg ? 40 : p->readyweapon == wp_supershotgun ? 2 : 1;
@@ -3148,8 +3298,9 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 
     if (p->pendingweapon!=wp_nochange) return;
     if (cur_ammo!=am_noammo && p->ammo[cur_ammo]>=cur_needed) {
-        boolean unsafe=p->readyweapon==wp_missile &&
-            !Bot_RocketLaneSafe(p->mo,enemy,dist);
+        boolean unsafe = (p->readyweapon==wp_missile && !rocket_clear) ||
+                         (p->readyweapon==wp_plasma && !plasma_clear) ||
+                         (p->readyweapon==wp_bfg && !bfg_clear);
         boolean ineffective=p->readyweapon==wp_supershotgun && dist>384*FRACUNIT;
         boolean modest_enemy=enemy && enemy->health<=70 &&
             enemy->type!=MT_CHAINGUY && nearby_attackers<3;
@@ -3158,7 +3309,7 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
             /* Finishing a zombie/imp with the gun already raised is faster
                than lowering it merely because another target is farther away. */
             if (modest_enemy && (p->readyweapon==wp_pistol ||
-                p->readyweapon==wp_chaingun || p->readyweapon==wp_plasma ||
+                p->readyweapon==wp_chaingun || (p->readyweapon==wp_plasma && plasma_clear) ||
                 (p->readyweapon==wp_shotgun && dist<640*FRACUNIT) ||
                 (p->readyweapon==wp_supershotgun && dist<320*FRACUNIT))) return;
         }
@@ -4481,8 +4632,19 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                switching here would invalidate its spread/blast calculation. */
             if (threat->type != MT_BARREL) Bot_Weapon(cmd, p, d, threat);
             if (p->readyweapon==wp_missile &&
-                !Bot_RocketLaneSafe(mo,threat,d))
-                can_fire=false;
+                (!Bot_RocketLaneSafe(mo,threat,d) ||
+                 !Bot_ProjectileClearance(p, aim, 16*FRACUNIT, 160*FRACUNIT))) {
+                can_fire = false;
+                weapon_switch_until = 0;
+            } else if (p->readyweapon==wp_plasma &&
+                       !Bot_ProjectileClearance(p, aim, 14*FRACUNIT, 56*FRACUNIT)) {
+                can_fire = false;
+                weapon_switch_until = 0;
+            } else if (p->readyweapon==wp_bfg &&
+                       !Bot_ProjectileClearance(p, aim, 22*FRACUNIT, 80*FRACUNIT)) {
+                can_fire = false;
+                weapon_switch_until = 0;
+            }
         } else {
             prefer_combat = false;
             can_fire = false;
@@ -4502,12 +4664,30 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             }
         }
 
-        if (!ranged_ammo) { prefer_combat=false; combat_pause_until=0; }
-        if (!ranged_ammo && !ledge_protect && !door_waiting &&
-            (goal.type != GO_ITEM || d < MELEERANGE) && d < 192*FRACUNIT && dz < 24*FRACUNIT &&
-            Bot_WalkStable(mo->x,mo->y,mo->z,threat->x,threat->y,mo,false)) {
-            tx=threat->x; ty=threat->y; stop=false;
-            combat_moved=true;
+        if (!ranged_ammo) {
+            boolean dangerous = (threat && (threat->type==MT_KNIGHT || threat->type==MT_BRUISER ||
+                                            threat->type==MT_FATSO || threat->type==MT_BABY ||
+                                            threat->type==MT_UNDEAD || threat->type==MT_HEAD ||
+                                            threat->type==MT_PAIN || threat->type==MT_CYBORG ||
+                                            threat->type==MT_SPIDER || threat->type==MT_VILE ||
+                                            threat->type==MT_CHAINGUY || threat->health > 70));
+            prefer_combat = false;
+            combat_pause_until = 0;
+            if (dangerous && !p->powers[pw_strength] && !p->weaponowned[wp_chainsaw]) {
+                /* Never charge high-tier monsters with bare fists! Retreat instead. */
+                fixed_t retreatx, retreaty;
+                if (!door_waiting && !lift_riding &&
+                    Bot_FindHitscanRetreat(mo, threat, ledge_protect, &retreatx, &retreaty)) {
+                    tx = retreatx; ty = retreaty;
+                    stop = false;
+                    combat_moved = true;
+                }
+            } else if (!ledge_protect && !door_waiting &&
+                       (goal.type != GO_ITEM || d < MELEERANGE) && d < 192*FRACUNIT && dz < 24*FRACUNIT &&
+                       Bot_WalkStable(mo->x,mo->y,mo->z,threat->x,threat->y,mo,false)) {
+                tx=threat->x; ty=threat->y; stop=false;
+                combat_moved=true;
+            }
         }
 
         /* Ordinary combat strafing is now a short burst around the position
@@ -4592,11 +4772,19 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             combat_strafe_until=0;
             combat_strafe_pause_until=leveltime+8;
         } else if (door_combat_window && prefer_combat) {
-            stop = true;
-            door_cross = false;
             door_fighting = true;
-            combat_strafe_until = 0;
-            combat_strafe_pause_until = leveltime + 8;
+            if (!can_fire) {
+                /* If line of fire is obstructed by the door jamb, do not freeze in place!
+                   Nudge toward the door crossing point to clear the angle. */
+                tx = door_tx; ty = door_ty;
+                stop = false;
+                door_cross = true;
+            } else {
+                stop = true;
+                door_cross = false;
+                combat_strafe_until = 0;
+                combat_strafe_pause_until = leveltime + 8;
+            }
         } else if (prefer_combat && !combat_moved) {
             boolean on_lift = (depart_lift_sector >= 0 && mo->subsector->sector - sectors == depart_lift_sector);
             if (!on_lift) stop = true;
@@ -4634,7 +4822,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if ((ranged_ammo || !(threat && can_fire &&
          P_AproxDistance(threat->x-mo->x,threat->y-mo->y) < MELEERANGE)) &&
         !ready_to_run && !interaction_lock &&
-        !door_cross && !door_waiting && !door_fighting && !lift_riding &&
+        !door_waiting && !lift_riding &&
         !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
         fixed_t dodgex, dodgey;
@@ -4792,7 +4980,20 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         int needed=p->readyweapon==wp_bfg ? 40 : p->readyweapon==wp_supershotgun ? 2 : 1;
         P_AimLineAttack(mo, shot, ammo==am_noammo ? MELEERANGE : MISSILERANGE);
         if (linetarget == threat && (ammo==am_noammo || p->ammo[ammo]>=needed)) {
-            cmd->buttons |= BT_ATTACK;
+            boolean proj_ok = true;
+            if (p->readyweapon == wp_plasma)
+                proj_ok = Bot_ProjectileClearance(p, shot, 14*FRACUNIT, 56*FRACUNIT);
+            else if (p->readyweapon == wp_bfg)
+                proj_ok = Bot_ProjectileClearance(p, shot, 22*FRACUNIT, 80*FRACUNIT);
+            else if (p->readyweapon == wp_missile)
+                proj_ok = Bot_RocketLaneSafe(mo, threat, P_AproxDistance(threat->x-mo->x, threat->y-mo->y)) &&
+                          Bot_ProjectileClearance(p, shot, 16*FRACUNIT, 160*FRACUNIT);
+
+            if (proj_ok) {
+                cmd->buttons |= BT_ATTACK;
+            } else {
+                weapon_switch_until = 0;
+            }
         }
     }
     if (!stop && !door_cross &&
