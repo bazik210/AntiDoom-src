@@ -102,6 +102,8 @@ static boolean map03_blue_door_done = false;
 static int combat_pause_until = 0;
 static int nearby_attackers = 0;
 static mobj_t *perch_enemy = NULL;
+static int depart_lift_sector = -1;
+static mobj_t *generic_key = NULL;
 static boolean map04_route = false;
 static boolean map04_lift_triggered = false;
 static boolean map04_lift_done = false;
@@ -953,6 +955,45 @@ static void Bot_ClearKeyProgressForSpecial(int special)
 
     key_progress_mask &= ~(1<<key);
 }
+static boolean Bot_PlatformInterior(sector_t *sector, fixed_t x, fixed_t y)
+{
+    int dx,dy;
+    const fixed_t r=PLAYERRADIUS+FRACUNIT;
+    for (dy=-1;dy<=1;++dy) for (dx=-1;dx<=1;++dx)
+        if (R_PointInSubsector(x+dx*r,y+dy*r)->sector != sector) return false;
+    return true;
+}
+
+static boolean Bot_PlatformHasUpperExit(plat_t *plat)
+{
+    int i;
+    for(i=0;i<plat->sector->linecount;++i) {
+        line_t *li=plat->sector->lines[i];
+        sector_t *other;
+        if (!li->backsector || li->flags&ML_BLOCKING) continue;
+        other=li->frontsector==plat->sector ? li->backsector : li->frontsector;
+        if (other==plat->sector) continue;
+        if (other->floorheight<=plat->high+24*FRACUNIT &&
+            (other->ceilingheight>=plat->high+56*FRACUNIT || Bot_UseDoor(li)))
+            return true;
+    }
+    return false;
+}
+
+static boolean Bot_PlatformCenter(mobj_t *mo, plat_t *plat, fixed_t *tx, fixed_t *ty)
+{
+    int dx,dy,best=INF;
+    for (dy=-96;dy<=96;dy+=8) for (dx=-96;dx<=96;dx+=8) {
+        fixed_t x=mo->x+dx*FRACUNIT, y=mo->y+dy*FRACUNIT;
+        int score=abs(dx)+abs(dy);
+        if (score>=best || !Bot_PlatformInterior(plat->sector,x,y)) continue;
+        if (!Bot_Walk(mo->x,mo->y,mo->z,x,y,mo,true) ||
+            probe.ceiling < plat->high+mo->height) continue;
+        best=score; *tx=x; *ty=y;
+    }
+    return best<INF;
+}
+
 static boolean Bot_LiftUseSpecial(int s)
 {
     switch (s) {
@@ -969,6 +1010,9 @@ static boolean Bot_LiftUseSpecial(int s)
 
 static void Bot_ClearLiftCommit(void)
 {
+    if (!map03_route && !map04_route && post_use_line==lift_commit_line) {
+        post_use_hold_until=post_use_local_until=commit_forward_until=0;
+    }
     lift_commit_line = -1;
     lift_commit_tag = 0;
     lift_commit_sector = -1;
@@ -1298,8 +1342,10 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_LAUN: return p->weaponowned[wp_missile] ? INF : -900;
         case SPR_BFUG: return p->weaponowned[wp_bfg] ? INF : -800;
 
+        case SPR_BON1: return p->health < 200 ? -200 : INF;
+        case SPR_BON2: return p->armorpoints < 200 ? -200 : INF;
         case SPR_STIM: case SPR_MEDI:
-            if (p->health >= 90) return INF;
+            if (p->health >= 100) return INF;
             if (p->health < 40) return -10000;
             return -1800;
 
@@ -1513,6 +1559,141 @@ static boolean Bot_ActionCommitted(void)
     return action_commit_until > leveltime;
 }
 
+/* Decorative light/ceiling triggers are not destinations. Their crossing
+   still works normally when a path happens to go through them. */
+static boolean Bot_ProgressSpecial(int s)
+{
+    switch (s) {
+        case 3: case 6: case 12: case 13: case 17: case 25: case 35:
+        case 44: case 54: case 57: case 72: case 73: case 74: case 75:
+        case 77: case 79: case 80: case 81: case 89: case 104:
+        case 125: case 126: return false;
+    }
+    return Bot_UseSpecial(s) || Bot_WalkSpecial(s);
+}
+
+/* The collision flood describes what is walkable NOW. This coarser graph
+   describes what can become walkable after doors, lifts and tagged switches.
+   Select the first action on a route to a missing key or exit, then leave
+   exact approach points and movement to the existing collision planner. */
+static int Bot_GenericProgress(player_t *p)
+{
+    int *dist=malloc(numsectors*sizeof(int));
+    int *first=malloc(numsectors*sizeof(int));
+    int *control=malloc(numsectors*sizeof(int));
+    int *previous=malloc(numsectors*sizeof(int));
+
+    int i,j,k,start=p->mo->subsector->sector-sectors,goal_line=-1,best=INF;
+    thinker_t *th;
+    generic_key=NULL;
+    if (!dist || !first || !control || !previous) I_Error("Bot: progression graph allocation failed");
+    for (i=0;i<numsectors;++i) { dist[i]=INF;first[i]=-1;control[i]=-1;previous[i]=-1; }
+    for (i=0;i<numlines;++i) {
+        line_t *li=&lines[i];
+        if (!li->special || !Bot_ProgressSpecial(li->special) ||
+            !Bot_HasKey(p,Bot_Key(li->special)) || Bot_IsExitSpecial(li->special) ||
+            li->special==39 || li->special==97) continue;
+        for (j=0;j<numsectors;++j) {
+            if (!((Bot_UseDoor(li) && li->backsector==&sectors[j]) ||
+                  (li->tag && li->tag==sectors[j].tag))) continue;
+            if (control[j]<0 ||
+                P_AproxDistance(li->v1->x+li->dx/2-p->mo->x,li->v1->y+li->dy/2-p->mo->y) <
+                P_AproxDistance(lines[control[j]].v1->x+lines[control[j]].dx/2-p->mo->x,
+                                lines[control[j]].v1->y+lines[control[j]].dy/2-p->mo->y))
+                control[j]=i;
+        }
+    }
+    dist[start]=0;
+    for (k=0;k<numsectors;++k) {
+        boolean changed=false;
+        int u;
+        for (u=0;u<numsectors;++u) {
+        if (dist[u]>=INF) continue;
+        for (i=0;i<sectors[u].linecount;++i) {
+            line_t *li=sectors[u].lines[i];
+            sector_t *other;
+            int v,action=-1,cost=128,source=-1,base=dist[u];
+            fixed_t opening;
+            if (!li->backsector || li->flags&ML_BLOCKING ||
+                !Bot_HasKey(p,Bot_Key(li->special)) ||
+                P_AproxDistance(li->dx,li->dy)<32*FRACUNIT) continue;
+            other=li->frontsector==&sectors[u] ? li->backsector : li->frontsector;
+            v=other-sectors;
+            if (v==u) continue;
+            opening=(other->ceilingheight < sectors[u].ceilingheight ?
+                     other->ceilingheight : sectors[u].ceilingheight) -
+                    (other->floorheight > sectors[u].floorheight ?
+                     other->floorheight : sectors[u].floorheight);
+            if (opening<56*FRACUNIT || other->floorheight>sectors[u].floorheight+24*FRACUNIT) {
+                action=control[v];
+                if (action<0) action=control[u];
+                if (action<0) continue;
+                {
+                    source=lines[action].frontsector-sectors;
+                    /* A switch behind its own gate cannot open that gate yet. */
+                    if (dist[source]>=INF) continue;
+                    if (dist[source]>base) base=dist[source];
+                    cost+=512;
+                }
+            }
+            if (other->floorheight<sectors[u].floorheight-24*FRACUNIT) cost+=256;
+            if (base+cost<dist[v]) {
+                dist[v]=base+cost;previous[v]=u;changed=true;
+                first[v]=first[u]>=0 ? first[u] :
+                    (source>=0 && first[source]>=0 ? first[source] : action);
+            }
+        }
+        /* Teleport destinations are objects in sectors selected by line tag. */
+        for (i=0;i<numlines;++i) if ((lines[i].special==39 || lines[i].special==97) &&
+            lines[i].frontsector==&sectors[u]) {
+            for (th=thinkercap.next;th!=&thinkercap;th=th->next) {
+                mobj_t *m; int v;
+                if (th->function.acp1!=(actionf_p1)P_MobjThinker) continue;
+                m=(mobj_t*)th;
+                if (m->type!=MT_TELEPORTMAN || m->subsector->sector->tag!=lines[i].tag) continue;
+                v=m->subsector->sector-sectors;
+                if (dist[u]+512<dist[v]) { changed=true;dist[v]=dist[u]+512;first[v]=first[u]>=0 ? first[u] : i; }
+            }
+        }
+    }
+        if (!changed) break;
+    }
+    for (th=thinkercap.next;th!=&thinkercap;th=th->next) {
+        mobj_t *m; int key=-1,v;
+        if (th->function.acp1!=(actionf_p1)P_MobjThinker) continue;
+        m=(mobj_t*)th;
+        if (!(m->flags&MF_SPECIAL)) continue;
+        if (m->sprite==SPR_BKEY || m->sprite==SPR_BSKU) key=it_bluecard;
+        if (m->sprite==SPR_RKEY || m->sprite==SPR_RSKU) key=it_redcard;
+        if (m->sprite==SPR_YKEY || m->sprite==SPR_YSKU) key=it_yellowcard;
+        v=m->subsector->sector-sectors;
+        if (key<0 || Bot_HasKey(p,key) || dist[v]>=best) continue;
+        best=dist[v];generic_key=m;goal_line=first[v];
+    }
+    if (!generic_key) for (i=0;i<numlines;++i) if (Bot_IsExitSpecial(lines[i].special)) {
+        int v=lines[i].frontsector-sectors;
+        if (dist[v]<best) { best=dist[v];goal_line=first[v]>=0 ? first[v] : i; }
+    }
+    /* The remote control can itself be behind another closed door. */
+    for (k=0;k<numsectors && goal_line>=0;++k) {
+        int v=lines[goal_line].frontsector-sectors;
+        int prior=first[v];
+        if (prior<0 || prior==goal_line) break;
+        goal_line=prior;
+    }
+    if (leveltime==0 && generic_key) {
+        int v=generic_key->subsector->sector-sectors;
+        I_Log("Bot: abstract key route action=%d",goal_line);
+        for(k=0;k<32 && v>=0;++k) {
+            I_Log(" %d(f=%d,c=%d,a=%d)",v,sectors[v].floorheight/FRACUNIT,
+                sectors[v].ceilingheight/FRACUNIT,first[v]);v=previous[v];
+        }
+        I_Log("\n");
+    }
+    free(dist);free(first);free(control);free(previous);
+    return goal_line;
+}
+
 static void Bot_Plan(player_t *p)
 {
     int i, n;
@@ -1672,6 +1853,8 @@ static void Bot_Plan(player_t *p)
                        map04_yellow_state == 2 ? map04_yellow_switch :
                        map04_yellow_state == 3 ? map04_yellow_return : 546;
     }
+    generic_key=NULL;
+    if (!map02_route && !map03_route && !map04_route) story_target=Bot_GenericProgress(p);
     if (story_target >= 0) {
         story_x = lines[story_target].v1->x + lines[story_target].dx/2;
         story_y = lines[story_target].v1->y + lines[story_target].dy/2;
@@ -1780,7 +1963,7 @@ static void Bot_Plan(player_t *p)
         if (map03_route && map03_platform_done &&
             (i == 86 || i == 87 || i == 344 || i == 345)) continue;
         double dx = (double)li->dx, dy = (double)li->dy, len = sqrt(dx*dx + dy*dy);
-        if (!special || len < FRACUNIT || line_retry[i] > leveltime || !Bot_HasKey(p,Bot_Key(special))) continue;
+        if (!special || !Bot_ProgressSpecial(special) || len < FRACUNIT || line_retry[i] > leveltime || !Bot_HasKey(p,Bot_Key(special))) continue;
         if (Bot_UseSpecial(special)) {
             int used_age = line_used[i] ? leveltime-line_used[i] : INT_MAX;
 
@@ -1863,8 +2046,7 @@ static void Bot_Plan(player_t *p)
                 }
             }
 
-            if (i != story_target && line_used[i] && !Bot_IsExitSpecial(special) &&
-                !Bot_UseDoor(li))
+            if (i != story_target && line_used[i] && !Bot_IsExitSpecial(special))
                 priority += USED_SWITCH_SOFT_PENALTY;
             if (prefer_forward && special != 11 && special != 51) {
                 priority += 3000;   // РІРѕ РІСЂРµРјСЏ commit СЃРёР»СЊРЅРѕ РЅРµ Р»СЋР±РёС‚ РґСЂСѓРіРёРµ РґРІРµСЂРё/СЃРµРєСЂРµС‚РєРё
@@ -1958,6 +2140,12 @@ static void Bot_Plan(player_t *p)
         mo = (mobj_t*)th;
         if (!(mo->flags & MF_SPECIAL)) continue;
         priority = Bot_ItemPriority(p,mo);
+        if (mo==generic_key && priority!=INF) priority=-30000;
+        if (priority!=INF && priority>-10000 && mo!=generic_key &&
+            lift_commit_line<0 && !forced_item_active &&
+            P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<128*FRACUNIT &&
+            abs(mo->z-p->mo->z)<24*FRACUNIT)
+            priority-=35000;
         if (map04_crate_route && !Bot_HasKey(p,it_redcard) &&
             (mo->sprite == SPR_RKEY || mo->sprite == SPR_RSKU)) priority=-80000;
         else if (map04_crate_route) continue;
@@ -2034,7 +2222,13 @@ static void Bot_Plan(player_t *p)
                                              Bot_Y(i)-story_y);
             /* Follow the reachable frontier toward the mandatory MAP03
                switch/teleporter instead of selecting unrelated exploration. */
-            score += to_story / FRACUNIT;
+            if (!map02_route && !map03_route && !map04_route)
+                score=cells[i].dist + to_story/FRACUNIT*16 + sector_visits[sec]*32;
+            else score += to_story / FRACUNIT;
+            score -= 12000;
+        } else if (generic_key) {
+            score += P_AproxDistance(Bot_X(i)-generic_key->x,
+                                    Bot_Y(i)-generic_key->y)/FRACUNIT*4;
             score -= 12000;
         } else if (key_progress && key_target_line >= 0) {
             fixed_t to_key=P_AproxDistance(Bot_X(i)-key_target_x,
@@ -2097,6 +2291,7 @@ void Bot_InitLevel(void)
     map03_route = Bot_MatchesRoute(&bot_routes[1]);
     map04_route = Bot_MatchesRoute(&bot_routes[2]);
     combat_pause_until = 0;
+    depart_lift_sector = -1;
     nearby_attackers = 0;
     perch_enemy = NULL;
     map04_lift_triggered = false;
@@ -2662,8 +2857,14 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist)
     if (p->weaponowned[wp_chainsaw]) best = wp_chainsaw;
     if (p->ammo[am_clip] > 0) best = wp_pistol;
     if (p->weaponowned[wp_chaingun] && p->ammo[am_clip]>0) best = wp_chaingun;
-    if (p->weaponowned[wp_shotgun] && p->ammo[am_shell]>0) best = wp_shotgun;
-    if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell]>=2) best = wp_supershotgun;
+    if (p->weaponowned[wp_shotgun] && p->ammo[am_shell]>0 &&
+        (best == wp_fist || best == wp_chainsaw || dist < 320*FRACUNIT)) best = wp_shotgun;
+    /* SSG's horizontal/vertical spread wastes most pellets at range.
+       Keep a little hysteresis to avoid swapping on each distance fluctuation. */
+    if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell]>=2 &&
+        (best == wp_fist || best == wp_chainsaw ||
+         dist < (p->readyweapon == wp_supershotgun ? 224 : 192)*FRACUNIT))
+        best = wp_supershotgun;
     if (p->weaponowned[wp_missile] && p->ammo[am_misl]>0 && dist>400*FRACUNIT) best = wp_missile;
     if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0) best = wp_plasma;
     else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40) best = wp_bfg;
@@ -3081,6 +3282,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     boolean door_combat_window = false;
     boolean door_fighting = false;
     boolean lift_riding = false;
+    boolean generic_lift = false;
+    fixed_t lift_x=0, lift_y=0;
     boolean ledge_protect = false;
     boolean perch_move = false;
     boolean combat_route_lock = false;
@@ -3092,7 +3295,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (!count) return;
     if (run_state && Bot_RunCommand(cmd,p)) return;
 
-    if (had_ranged_ammo && !Bot_HasRangedAmmo(p)) next_plan=0;
+    if (had_ranged_ammo && !Bot_HasRangedAmmo(p)) { next_plan=0; combat_pause_until=0; }
     had_ranged_ammo=Bot_HasRangedAmmo(p);
     if (map04_route && Bot_HasKey(p,it_bluecard) && !Bot_HasKey(p,it_yellowcard)) {
         int room=mo->subsector->sector-sectors;
@@ -3298,16 +3501,33 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         mo->subsector->sector == &sectors[14])
         lift_riding = true;
 
-    /* Exploration can board without using a switch. Wait for the actual
-       platform, including its bottom pause; perpetual lifts release at top. */
+    /* Ride only after the entire player footprint is aboard. */
     if (!map03_route && !map04_route && mo->z <= mo->floorz + FRACUNIT) {
         for (i=0; i<MAXPLATS; ++i) {
             plat_t *plat=activeplats[i];
-            if (!plat || plat->sector != mo->subsector->sector) continue;
-            lift_riding = plat->status != in_stasis &&
-                          plat->sector->floorheight < plat->high;
-            if (!lift_riding && lift_commit_boarded) {
-                Bot_ClearLiftCommit();
+            boolean overlap=false, descending;
+            int dx,dy;
+            if (!plat || plat->status == in_stasis) continue;
+            for (dy=-1;dy<=1;++dy) for (dx=-1;dx<=1;++dx)
+                if (R_PointInSubsector(mo->x+dx*PLAYERRADIUS,
+                                      mo->y+dy*PLAYERRADIUS)->sector == plat->sector)
+                    overlap=true;
+            if (!overlap || abs(plat->sector->floorheight-mo->floorz)>24*FRACUNIT) continue;
+            descending=!Bot_PlatformHasUpperExit(plat) || (goal.type != GO_NONE &&
+                R_PointInSubsector(goal.x,goal.y)->sector != plat->sector &&
+                R_PointInSubsector(goal.x,goal.y)->sector->floorheight <= plat->low);
+            lift_riding = descending ? plat->sector->floorheight > plat->low :
+                                       plat->sector->floorheight < plat->high;
+            if (lift_riding) {
+                generic_lift=true;
+                depart_lift_sector=plat->sector-sectors;
+                lift_x=mo->x; lift_y=mo->y;
+                if (!Bot_PlatformInterior(plat->sector,mo->x,mo->y) ||
+                    !Bot_Position(mo->x,mo->y,mo,false,NULL) ||
+                    probe.ceiling < plat->high+mo->height)
+                    Bot_PlatformCenter(mo,plat,&lift_x,&lift_y);
+            } else {
+                if (lift_commit_boarded) Bot_ClearLiftCommit();
                 next_plan=0;
             }
             break;
@@ -3366,6 +3586,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     }
 
     sec = mo->subsector->sector-sectors;
+    if (depart_lift_sector >= 0 && sec != depart_lift_sector) depart_lift_sector=-1;
     if (sec != last_sector) { ++sector_visits[sec]; last_sector = sec; }
 
     Bot_RememberNearbyLockedLines(p);
@@ -3723,8 +3944,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 explore_cooldown_until=leveltime+350;
                 /* Do not postpone the replan on every tic while the controller
                    is braking inside the arrival radius. */
-                if (next_plan > leveltime+18)
-                    next_plan=leveltime+18;
+                next_plan=leveltime+1;
             } else {
                 next_plan=leveltime+1;
             }
@@ -3792,6 +4012,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (!threat && perch_enemy && Bot_HasRangedAmmo(p) &&
         !map04_crate_route && !ledge_protect && !lift_riding &&
         !ready_to_run && !interaction_lock && door_commit_line < 0 &&
+        !(depart_lift_sector >= 0 && goal.type != GO_NONE && R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT) &&
         Bot_PerchApproach(mo,perch_enemy,&tx,&ty)) {
         perch_move=true;
         stop=false;
@@ -3828,10 +4049,14 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean combat_moved = false;
 
         boolean urgent = p->health <= 35 || nearby_attackers >= 3;
+        boolean supply_run = goal.type==GO_ITEM && p->health<=35;
         boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
+        boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
+            R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
         /* Precision routes forbid strafing, not braking to defend ourselves. */
         prefer_combat = ranged_ammo && d < (urgent ? 800 : 640)*FRACUNIT &&
-            (!map04_crate_route || urgent);
+            (!map04_crate_route || urgent) &&
+            !(route_drop && high_ground && !urgent) && !supply_run;
         can_fire = d < 800*FRACUNIT;
         /* While approaching a timed platform, combat may still aim and fire,
            but it must not replace the route with an endless dodge/strafe. */
@@ -3851,7 +4076,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             prefer_combat = false;
         }
 
-        if (!combat_route_lock && !high_ground && !lift_riding && !door_combat_window &&
+        if (ranged_ammo && !supply_run && !combat_route_lock && !high_ground && !lift_riding && !door_combat_window &&
             (threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT) {
             fixed_t retreatx, retreaty;
             if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
@@ -3865,9 +4090,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             }
         }
 
-        if (weaponinfo[p->readyweapon].ammo == am_noammo) prefer_combat=false;
+        if (!ranged_ammo) { prefer_combat=false; combat_pause_until=0; }
         if (!ranged_ammo && !ledge_protect && !door_waiting &&
-            goal.type != GO_ITEM && d < 192*FRACUNIT && dz < 24*FRACUNIT &&
+            (goal.type != GO_ITEM || d < MELEERANGE) && d < 192*FRACUNIT && dz < 24*FRACUNIT &&
             Bot_WalkStable(mo->x,mo->y,mo->z,threat->x,threat->y,mo,false)) {
             tx=threat->x; ty=threat->y; stop=false;
             combat_moved=true;
@@ -3993,7 +4218,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        own avoidance pass: predict impact and override movement while preserving
        the aim on the monster.  Do not do this during precision traversal or
        while operating/crossing a door. */
-    if (!combat_route_lock && !perch_move && !ready_to_run && !interaction_lock &&
+    if ((ranged_ammo || !(threat && can_fire &&
+         P_AproxDistance(threat->x-mo->x,threat->y-mo->y) < MELEERANGE)) &&
+        !combat_route_lock && !perch_move && !ready_to_run && !interaction_lock &&
         !door_cross && !door_waiting && !door_fighting && !lift_riding &&
         !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
@@ -4247,6 +4474,11 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         }
     } else stuck_since=0;
     if (lift_riding) {
+        if (generic_lift) {
+            Bot_MoveEx(cmd,mo,lift_x,lift_y,
+                P_AproxDistance(lift_x-mo->x,lift_y-mo->y)<FRACUNIT,3.0);
+            return;
+        }
         /* Steer toward the known landing in world coordinates, including while
            looking at a monster. Other lifts retain their stationary ride. */
         if (map03_route && !map03_platform_done)

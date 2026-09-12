@@ -1,4 +1,4 @@
-param([string]$Test = 'bot_run')
+param([string]$Test = 'bot_run', [string]$OutputName = $Test)
 $ErrorActionPreference = 'Stop'
 $engine = (Resolve-Path (Join-Path $PSScriptRoot '..\linuxdoom-1.10')).Path
 $outdir = Join-Path $PSScriptRoot '..\..\scratch\headless'
@@ -16,9 +16,9 @@ foreach ($source in $sources) {
         & gcc @flags @extra -c $source.FullName -o $object
         if ($LASTEXITCODE) { throw "Compilation failed: $($source.Name)" }
     }
-    if (!(($Test -in @('bot_run','bot_tick_regression','bot_route_regression')) -and $source.Name -eq 'p_bot.c')) { $objects += $object }
+    if (!(($Test -in @('bot_run','bot_tick_regression','bot_route_regression','bot_behavior_regression')) -and $source.Name -eq 'p_bot.c')) { $objects += $object }
 }
-$out = Join-Path $outdir ($Test + '.exe')
+$out = Join-Path $outdir ($OutputName + '.exe')
 & gcc @flags (Join-Path $PSScriptRoot ($Test + '.c')) (Join-Path $PSScriptRoot 'headless_platform.c') @objects -o $out -luser32 -lgdi32 -lwinmm -lws2_32 -ldbghelp -lm
 if ($LASTEXITCODE) { throw 'Test link failed' }
 Write-Output $out

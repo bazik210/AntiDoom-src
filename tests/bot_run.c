@@ -38,6 +38,11 @@ int main(int argc, char **argv)
     V_Init(); R_Init(); P_Init(); HU_Init(); ST_Init();
     G_InitNew(skill, episode, map);
     R_ExecuteSetViewSize();
+    if (!map02_route && !map03_route && !map04_route) {
+        int li=Bot_GenericProgress(&players[0]);
+        printf("GENERIC initial action=%d key=%d,%d\n",li,
+            generic_key ? generic_key->x/FRACUNIT:0,generic_key ? generic_key->y/FRACUNIT:0);
+    }
     for (t = 0; t < limit && gameaction == ga_nothing; ++t) {
         Bot_BuildTiccmd(&players[0].cmd, &players[0]);
         P_Ticker(); ++gametic;
@@ -45,6 +50,16 @@ int main(int argc, char **argv)
         if (players[0].playerstate == PST_DEAD) break;
     }
     printf("RESULT map=%d episode=%d nomonsters=%d skill=%d tics=%d hp=%d action=%d kills=%d/%d pos=%d,%d\n", map, episode, nomonsters, skill+1, t, players[0].health, gameaction, players[0].killcount, totalkills, players[0].mo->x/FRACUNIT, players[0].mo->y/FRACUNIT);
+    printf("GOAL type=%d line=%d xy=%d,%d lift=%d boarded=%d sector=%d\n",
+        goal.type,goal.line,goal.x/FRACUNIT,goal.y/FRACUNIT,lift_commit_line,
+        lift_commit_boarded,(int)(players[0].mo->subsector->sector-sectors));
+    for(t=0;t<MAXPLATS;++t) if(activeplats[t]) {
+        plat_t *pl=activeplats[t];
+        printf("PLAT sector=%d status=%d floor=%d low=%d high=%d interior=%d\n",
+            (int)(pl->sector-sectors),pl->status,pl->sector->floorheight/FRACUNIT,
+            pl->low/FRACUNIT,pl->high/FRACUNIT,
+            Bot_PlatformInterior(pl->sector,players[0].mo->x,players[0].mo->y));
+    }
     printf("CARDS %d %d %d %d %d %d\n", players[0].cards[0],players[0].cards[1],players[0].cards[2],players[0].cards[3],players[0].cards[4],players[0].cards[5]);
     printf("STATE z=%d floor=%d ceil=%d cmd=%d,%d,%d,%d path=%d/%d\n",players[0].mo->z/FRACUNIT,players[0].mo->floorz/FRACUNIT,players[0].mo->ceilingz/FRACUNIT,players[0].cmd.forwardmove,players[0].cmd.sidemove,players[0].cmd.angleturn,players[0].cmd.buttons,path_step,path_len);
     { extern fixed_t tmfloorz,tmceilingz; mobj_t *mo=players[0].mo; fixed_t x=mo->x,y=mo->y+2*FRACUNIT; int ok=P_CheckPosition(mo,x,y); printf("PHYS angle=%u mom=%d,%d flags=%x check=%d floor=%d ceil=%d bot=%d height=%d\n",mo->angle,mo->momx,mo->momy,mo->flags,ok,tmfloorz/FRACUNIT,tmceilingz/FRACUNIT,Bot_Walk(mo->x,mo->y,mo->z,x,y,mo,true),mo->height/FRACUNIT); }
