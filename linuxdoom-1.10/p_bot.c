@@ -1786,6 +1786,38 @@ static int Bot_GenericProgress(player_t *p)
     return goal_line;
 }
 
+static boolean Bot_Map06HasPillarBlue(void)
+{
+    thinker_t *th;
+    for (th = thinkercap.next; th != &thinkercap; th = th->next) {
+        mobj_t *mo;
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+        mo = (mobj_t*)th;
+        if (!(mo->flags & MF_SPECIAL)) continue;
+        if ((mo->sprite == SPR_BKEY || mo->sprite == SPR_BSKU) &&
+            P_AproxDistance(mo->x - 448*FRACUNIT, mo->y - 224*FRACUNIT) < 64*FRACUNIT)
+            return true;
+    }
+    return false;
+}
+
+static int Bot_Map06Route(player_t *p)
+{
+    if (!Bot_HasKey(p, it_bluecard) && Bot_Map06HasPillarBlue()) {
+        int sec = (int)(p->mo->subsector->sector - sectors);
+        if (sec == 122) return -1;
+        if (sectors[122].floorheight <= -400*FRACUNIT) return 184;
+        if (!line_used[183]) return 183;
+        return 359;
+    }
+    if (Bot_HasKey(p, it_bluecard)) {
+        int sec = (int)(p->mo->subsector->sector - sectors);
+        if (sec == 120) return -1;
+        if (sec == 101 || sec == 102 || sec == 124) return 355;
+    }
+    return Bot_GenericProgress(p);
+}
+
 static int Bot_Map05Route(player_t *p)
 {
     int sec_idx = (int)(p->mo->subsector->sector - sectors);
@@ -1978,8 +2010,10 @@ static void Bot_Plan(player_t *p)
                        map04_yellow_state == 3 ? map04_yellow_return : 546;
     }
     if (map05_route) story_target = Bot_Map05Route(p);
+    if (campaign_hint && campaign_hint->map == 6) story_target = Bot_Map06Route(p);
     generic_key=NULL;
-    if (!map02_route && !map03_route && !map04_route && !map05_route) story_target=Bot_GenericProgress(p);
+    if (!map02_route && !map03_route && !map04_route && !map05_route &&
+        (!campaign_hint || campaign_hint->map != 6)) story_target=Bot_GenericProgress(p);
     if (story_target >= 0) {
         story_x = lines[story_target].v1->x + lines[story_target].dx/2;
         story_y = lines[story_target].v1->y + lines[story_target].dy/2;
@@ -3298,8 +3332,9 @@ static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
 
     /* Near the landing in XY is not a landing: the player may still be above
        the gap. Hand control back only after reaching supported floor. */
-    if (dist < (map04_crate_route ? 8 : 20)*FRACUNIT && mo->z <= mo->floorz &&
-        mo->floorz >= run_start_z-24*FRACUNIT &&
+    if ((dist < ((campaign_hint && campaign_hint->map == 6) ? 80 : (map04_crate_route ? 8 : 20))*FRACUNIT ||
+         (campaign_hint && campaign_hint->map == 6 && mo->subsector->sector == &sectors[120])) && mo->z <= mo->floorz &&
+        (mo->floorz >= run_start_z-24*FRACUNIT || (campaign_hint && campaign_hint->map == 6)) &&
         R_PointInSubsector(mo->x,mo->y)->sector->floorheight >= mo->floorz-24*FRACUNIT) {
         run_state = 0;
         goal.type = GO_NONE;
@@ -3321,7 +3356,7 @@ static boolean Bot_RunCommand(ticcmd_t *cmd, player_t *p)
     }
 
     if (leveltime >= run_until ||
-        (mo->z < run_start_z-64*FRACUNIT && dist > 32*FRACUNIT)) {
+        (!(campaign_hint && campaign_hint->map == 6) && mo->z < run_start_z-64*FRACUNIT && dist > 32*FRACUNIT)) {
         failed_run_sx=run_sx; failed_run_sy=run_sy;
         failed_run_tx=run_tx; failed_run_ty=run_ty;
         failed_run_until=leveltime+175;
@@ -3768,6 +3803,18 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         mo->subsector->sector == &sectors[14])
         lift_riding = true;
 
+    if (campaign_hint && campaign_hint->map == 6 && mo->subsector->sector == &sectors[120]) {
+        if (!Bot_HasKey(p, it_bluecard)) {
+            Bot_Move(cmd, mo, 448*FRACUNIT, 224*FRACUNIT, false);
+            return;
+        } else {
+            cmd->forwardmove = 50;
+            cmd->sidemove = 0;
+            cmd->angleturn = (short)((R_PointToAngle2(mo->x, mo->y, 448*FRACUNIT, 320*FRACUNIT) - mo->angle) >> 16);
+            return;
+        }
+    }
+
     /* Ride only after the entire player footprint is aboard. */
     if (!map03_route && !map04_route && mo->z <= mo->floorz + FRACUNIT) {
         for (i=0; i<MAXPLATS; ++i) {
@@ -3794,7 +3841,30 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             }
             lift_riding = descending ? plat->sector->floorheight > plat->low :
                                        plat->sector->floorheight < plat->high;
-            if (lift_riding) {
+            if (campaign_hint && campaign_hint->map == 6 && plat->sector == &sectors[122] &&
+                !Bot_HasKey(p, it_bluecard) && Bot_Map06HasPillarBlue()) {
+                if (plat->sector->floorheight >= 32*FRACUNIT) {
+                    lift_riding = false;
+                    generic_lift = false;
+                    if (lift_commit_boarded) Bot_ClearLiftCommit();
+                    run_state = 2;
+                    run_until = leveltime + 70;
+                    run_sx = mo->x; run_sy = mo->y;
+                    run_tx = 448*FRACUNIT; run_ty = 224*FRACUNIT;
+                    run_start_z = mo->z;
+                    run_goal_x = 448*FRACUNIT; run_goal_y = 224*FRACUNIT; run_goal_z = -192*FRACUNIT;
+                    path_len = path_step = 0;
+                    goal.type = GO_NONE;
+                    cmd->forwardmove = 50;
+                    cmd->angleturn = (short)((R_PointToAngle2(mo->x,mo->y,448*FRACUNIT,224*FRACUNIT)-mo->angle)>>16);
+                    I_Log("Bot: MAP06 blue key momentum launch! pos=(%d,%d)\n", mo->x/FRACUNIT, mo->y/FRACUNIT);
+                    return;
+                } else {
+                    lift_riding = true;
+                    generic_lift = true;
+                    lift_x = 448*FRACUNIT; lift_y = 672*FRACUNIT;
+                }
+            } else if (lift_riding) {
                 generic_lift=true;
                 depart_lift_sector=plat->sector-sectors;
                 lift_x=mo->x; lift_y=mo->y;
