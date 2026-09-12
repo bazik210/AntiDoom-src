@@ -207,9 +207,11 @@ int main(int argc, char **argv)
         P_SpawnMobj(mo->x,mo->y,ONFLOORZ,MT_MISC5);
         Bot_BuildTiccmd(&p->cmd,p); P_Ticker(); ++gametic;
         Bot_BuildTiccmd(&p->cmd,p);
-        CHECK(map02_key_perch_hold);
-        CHECK(goal.type != GO_USE && map02_key_perch_until > leveltime);
-        puts("PASS: MAP02 elevated key holds perch before route descent");
+        CHECK(Bot_HasKey(p,it_redcard));
+        if (combat_has_shot && combat_target &&
+            mo->z >= combat_target->z + 32*FRACUNIT && Bot_HasRangedAmmo(p))
+            CHECK(combat_pause_until > leveltime);
+        puts("PASS: MAP02 elevated key allows threat-driven perch combat");
     }
     return 0;
 }

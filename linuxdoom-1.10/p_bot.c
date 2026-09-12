@@ -99,9 +99,9 @@ static boolean map03_teleport_done = false;
 static boolean map03_final_lift_done = false;
 static boolean map03_red_door_done = false;
 static boolean map03_blue_door_done = false;
-static boolean map02_key_perch_hold = false;
-static int map02_key_perch_until = 0;
-static fixed_t map02_key_perch_x = 0, map02_key_perch_y = 0;
+static int combat_pause_until = 0;
+static int nearby_attackers = 0;
+static mobj_t *perch_enemy = NULL;
 static boolean map04_route = false;
 static boolean map04_lift_triggered = false;
 static boolean map04_lift_done = false;
@@ -955,15 +955,13 @@ static void Bot_ClearKeyProgressForSpecial(int special)
 }
 static boolean Bot_LiftUseSpecial(int s)
 {
-    /* Generic lifts stay ordinary remote switches. Keep the sticky ride
-       transaction only for the verified MAP03/MAP04 routes. */
-    if (!map03_route && !map04_route) return false;
     switch (s) {
         case 21:  /* S1 lift lower-wait-raise */
         case 62:  /* SR lift */
         case 122: /* S1 fast lift */
         case 123: /* SR fast lift */
-        case 88:  /* MAP04 walk-over lift */
+        case 10: case 88:  /* walk-over lifts */
+        case 120: case 121: /* fast walk-over lifts */
             return true;
     }
     return false;
@@ -2098,9 +2096,9 @@ void Bot_InitLevel(void)
     map02_route = Bot_MatchesRoute(&bot_routes[0]);
     map03_route = Bot_MatchesRoute(&bot_routes[1]);
     map04_route = Bot_MatchesRoute(&bot_routes[2]);
-    map02_key_perch_hold = false;
-    map02_key_perch_until = 0;
-    map02_key_perch_x = map02_key_perch_y = 0;
+    combat_pause_until = 0;
+    nearby_attackers = 0;
+    perch_enemy = NULL;
     map04_lift_triggered = false;
     map04_lift_done = false;
     map04_crate_route = map04_crate_retry = false;
@@ -2257,6 +2255,8 @@ static mobj_t *Bot_Threat(player_t *p)
     fixed_t bestdist = 1000*FRACUNIT, bestscore = INT_MAX, current_dist = INT_MAX;
 
     combat_has_shot = false;
+    nearby_attackers = 0;
+    perch_enemy = NULL;
 
     for (th = thinkercap.next; th != &thinkercap; th = th->next) {
         mobj_t *mo;
@@ -2272,6 +2272,12 @@ static mobj_t *Bot_Threat(player_t *p)
 
         dist = P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y);
         if (dist >= 1000*FRACUNIT || !P_CheckSight(p->mo,mo)) continue;
+
+        if (dist < 640*FRACUNIT && mo->target == p->mo) ++nearby_attackers;
+        if (dist < 640*FRACUNIT && p->mo->z >= mo->z + 32*FRACUNIT &&
+            (!perch_enemy || dist < P_AproxDistance(perch_enemy->x-p->mo->x,
+                                                   perch_enemy->y-p->mo->y)))
+            perch_enemy=mo;
 
         /* A visible sprite is not necessarily shootable through a sill/corner.
            Only a real weapon trace is allowed to acquire or replace a target. */
@@ -2393,6 +2399,35 @@ static mobj_t *Bot_Threat(player_t *p)
         combat_strafe_until = combat_strafe_pause_until = 0;
     }
     return NULL;
+}
+
+/* Before leaving high ground, look for a nearby firing position. A visible
+   enemy behind a sill is not yet a firing solution: trace from each candidate
+   and require a supported path, rather than waiting blindly after a pickup. */
+static boolean Bot_PerchApproach(mobj_t *mo, mobj_t *enemy,
+                                 fixed_t *outx, fixed_t *outy)
+{
+    static const int ox[8]={1,-1,0,0,1,1,-1,-1};
+    static const int oy[8]={0,0,1,-1,1,-1,1,-1};
+    int radius, i;
+    for (radius=24; radius<=96; radius+=24) {
+        for (i=0; i<8; ++i) {
+            mobj_t from=*mo;
+            fixed_t distance;
+            from.x += ox[i]*radius*FRACUNIT;
+            from.y += oy[i]*radius*FRACUNIT;
+            if (!Bot_WalkLedgeSafe(mo->x,mo->y,mo->z,from.x,from.y,mo,true)) continue;
+            from.z=probe.floor;
+            if (from.z < mo->z-8*FRACUNIT) continue;
+            distance=P_AproxDistance(enemy->x-from.x,enemy->y-from.y);
+            P_AimLineAttack(&from,R_PointToAngle2(from.x,from.y,enemy->x,enemy->y),
+                           distance+64*FRACUNIT);
+            if (linetarget != enemy) continue;
+            *outx=from.x; *outy=from.y;
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Keep combat movement local.  Ordinary target-strafing and projectile dodges
@@ -3047,6 +3082,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     boolean door_fighting = false;
     boolean lift_riding = false;
     boolean ledge_protect = false;
+    boolean perch_move = false;
     boolean combat_route_lock = false;
     double ledge_speed = 4.2;
     static int next_door_combat_log = 0;
@@ -3262,6 +3298,22 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         mo->subsector->sector == &sectors[14])
         lift_riding = true;
 
+    /* Exploration can board without using a switch. Wait for the actual
+       platform, including its bottom pause; perpetual lifts release at top. */
+    if (!map03_route && !map04_route && mo->z <= mo->floorz + FRACUNIT) {
+        for (i=0; i<MAXPLATS; ++i) {
+            plat_t *plat=activeplats[i];
+            if (!plat || plat->sector != mo->subsector->sector) continue;
+            lift_riding = plat->status != in_stasis &&
+                          plat->sector->floorheight < plat->high;
+            if (!lift_riding && lift_commit_boarded) {
+                Bot_ClearLiftCommit();
+                next_plan=0;
+            }
+            break;
+        }
+    }
+
     if (door_commit_line >= 0 && leveltime < door_commit_until) {
         /* Once the PLAYER CENTER is on the opposite side of the operated
            linedef, the atomic press->cross action succeeded. Do not require the
@@ -3329,23 +3381,6 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         if (gained) {
             key_progress_mask |= gained;
 
-            /* MAP02's red key is on a raised house. Hold that safe height for
-               a short engagement after pickup so visible monsters below can be
-               cleared before navigation considers the drop back down. */
-            if (map02_route && (gained & ((1 << it_bluecard) |
-                                          (1 << it_yellowcard) |
-                                          (1 << it_redcard))) &&
-                p->mo->z >= 48*FRACUNIT &&
-                P_AproxDistance(p->mo->x-map02_key_house_x*FRACUNIT,
-                                p->mo->y-map02_key_house_y*FRACUNIT) <
-                256*FRACUNIT) {
-                map02_key_perch_hold = true;
-                map02_key_perch_until = leveltime + TICRATE*3;
-                map02_key_perch_x = p->mo->x;
-                map02_key_perch_y = p->mo->y;
-                I_Log("Bot: MAP02 red-key perch hold started\n");
-            }
-
             if (line_key_memory) {
                 for (li=0; li<numlines; ++li) {
                     int key=Bot_Key(lines[li].special);
@@ -3366,16 +3401,16 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     last_x = mo->x; last_y = mo->y;
     /* Finish the already selected door crossing before doing another flood
        and off-mesh search. Replanning here can pause an otherwise open door. */
-    if (leveltime >= map02_key_perch_until)
-        map02_key_perch_hold = false;
+    /* Keep the selected route through combat and brief LOS flicker. */
+    threat = Bot_Threat(p);
     if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding &&
-        !map02_key_perch_hold)
+        leveltime >= combat_pause_until)
         Bot_Plan(p);
     ledge_protect = (forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
                      P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
 
-    combat_route_lock = map02_key_perch_hold || map04_crate_route || ledge_protect ||
+    combat_route_lock = map04_crate_route || ledge_protect ||
         (goal.type != GO_NONE && !Bot_LedgeSafe(mo->x,mo->y));
     if (!ledge_protect) {
         ledge_anchor_valid=false;
@@ -3748,18 +3783,19 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         stop = true;
     }
 
-    if (map02_key_perch_hold && door_commit_line < 0 && !lift_riding) {
-        /* Keep feet on the pickup platform while the combat controller may
-           still turn the view toward monsters below. */
-        tx = map02_key_perch_x;
-        ty = map02_key_perch_y;
-        stop = true;
-    }
-
     if (lift_riding) {
         if (map03_route && !map03_platform_done) {
             tx=2816*FRACUNIT; ty=3360*FRACUNIT; stop=false;
         } else { tx=mo->x; ty=mo->y; stop=true; }
+    }
+
+    if (!threat && perch_enemy && Bot_HasRangedAmmo(p) &&
+        !map04_crate_route && !ledge_protect && !lift_riding &&
+        !ready_to_run && !interaction_lock && door_commit_line < 0 &&
+        Bot_PerchApproach(mo,perch_enemy,&tx,&ty)) {
+        perch_move=true;
+        stop=false;
+        combat_pause_until=leveltime+TICRATE;
     }
 
     aim = R_PointToAngle2(mo->x, mo->y, tx, ty);
@@ -3770,12 +3806,11 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     /* Closed-door operation stays atomic, but once the doorway is OPEN the bot
        must defend itself.  door_combat_window keeps the same door commit alive
        while allowing a real weapon trace to acquire monsters in the next room. */
-    if (ready_to_run || exit_goal || door_waiting ||
-        leveltime < exit_commit_until ||
-        (interaction_lock && !door_combat_window))
+    if (ready_to_run || leveltime < exit_commit_until ||
+        ((exit_goal || door_waiting || (interaction_lock && !door_combat_window)) &&
+         !(threat && (p->health <= 35 || nearby_attackers >= 3))))
         threat = NULL;
-    else
-        threat = Bot_Threat(p);
+
 
     /* A short lost-sight grace holds the previous view direction, but movement
        remains under navigation control until a real weapon trace reacquires the
@@ -3792,18 +3827,23 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         fixed_t dz = abs(hismid-mymid);
         boolean combat_moved = false;
 
-        prefer_combat = ranged_ammo && !combat_route_lock && d < 500*FRACUNIT;
-        can_fire = d < 500*FRACUNIT;
+        boolean urgent = p->health <= 35 || nearby_attackers >= 3;
+        boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
+        /* Precision routes forbid strafing, not braking to defend ourselves. */
+        prefer_combat = ranged_ammo && d < (urgent ? 800 : 640)*FRACUNIT &&
+            (!map04_crate_route || urgent);
+        can_fire = d < 800*FRACUNIT;
         /* While approaching a timed platform, combat may still aim and fire,
            but it must not replace the route with an endless dodge/strafe. */
-        if (lift_commit_line >= 0 && !lift_commit_boarded)
+        if (lift_commit_line >= 0 && !lift_commit_boarded && !urgent)
             prefer_combat = false;
 
         /* When the target is almost overhead, its XY bearing can flip by 90-180
            degrees from a one-unit movement.  Do not let that pathological
            azimuth steal the first-person view; move out from underneath first. */
         if (!(dz > 40*FRACUNIT && d < 96*FRACUNIT)) {
-            aim = combat_last_aim;
+            if (!(map04_crate_route && Bot_HasKey(p,it_redcard)) || prefer_combat)
+                aim = combat_last_aim;
             /* Barrel safety was checked for the current weapon. Keep it;
                switching here would invalidate its spread/blast calculation. */
             if (threat->type != MT_BARREL) Bot_Weapon(cmd, p, d);
@@ -3811,7 +3851,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             prefer_combat = false;
         }
 
-        if (!combat_route_lock && threat->type == MT_CHAINGUY && d < 420*FRACUNIT) {
+        if (!combat_route_lock && !high_ground && !lift_riding && !door_combat_window &&
+            (threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT) {
             fixed_t retreatx, retreaty;
             if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
                                        &retreatx,&retreaty)) {
@@ -3836,9 +3877,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
            where this engagement began.  v8 rebuilt a 48-unit side target from
            the NEW player position every tic, which effectively meant "keep
            walking sideways forever" and could carry the bot into another room. */
-        if (prefer_combat && !ledge_protect && !door_combat_window &&
+        if (prefer_combat && !combat_route_lock && !high_ground && !door_combat_window &&
             !lift_riding && threat->type != MT_BARREL &&
-            threat->type != MT_TROOP &&
             leveltime >= missile_dodge_pause_until &&
             d < 350*FRACUNIT && d > 96*FRACUNIT && dz < 40*FRACUNIT) {
             fixed_t burst_dist;
@@ -3920,17 +3960,25 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             door_fighting = true;
             combat_strafe_until = 0;
             combat_strafe_pause_until = leveltime + 8;
-        } else if (prefer_combat && !ledge_protect && !combat_moved) {
+        } else if (prefer_combat && !combat_moved) {
             stop = true;
+        }
+        if (prefer_combat) {
+            combat_pause_until = leveltime + TICRATE;
+            perch_move = high_ground && !lift_riding;
+            ready_to_use = false;
+            interaction_lock = false;
         }
         if (mlook) lookdir = 0;
     } else if (ranged_ammo && combat_view_grace && !interaction_lock && !ready_to_run &&
-               !exit_goal && !door_waiting) {
+               !exit_goal && !door_waiting &&
+               !(map04_crate_route && Bot_HasKey(p,it_redcard))) {
         /* Recompute the bearing to the last-known position. A frozen absolute
            angle becomes wrong as the player moves and can itself cause a snap.
            At an open doorway, hold the chokepoint briefly through a LOS flicker
            instead of instantly walking into the room where the monster vanished. */
         aim = R_PointToAngle2(mo->x,mo->y,combat_last_x,combat_last_y);
+        if (leveltime < combat_pause_until) stop = true;
         if (door_combat_window) {
             stop = true;
             door_cross = false;
@@ -3945,7 +3993,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        own avoidance pass: predict impact and override movement while preserving
        the aim on the monster.  Do not do this during precision traversal or
        while operating/crossing a door. */
-    if (!combat_route_lock && !ready_to_run && !interaction_lock &&
+    if (!combat_route_lock && !perch_move && !ready_to_run && !interaction_lock &&
         !door_cross && !door_waiting && !door_fighting && !lift_riding &&
         !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
@@ -3961,6 +4009,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
     turn = (short)((aim - mo->angle) >> 16);
     cmd->angleturn = Bot_Clamp(turn, 2400);
+    if (map04_crate_route && Bot_HasKey(p,it_redcard) &&
+        !prefer_combat && abs(turn) > 6000)
+        stop=true;
 
     if (door_fighting && threat && leveltime >= next_door_combat_log) {
         I_Log("Bot: door combat line=%d enemy=%d dist=%d hold crossing\n",
@@ -4204,6 +4255,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             Bot_MoveEx(cmd,mo,lift_commit_target_x,lift_commit_target_y,false,4.0);
         else
             Bot_MoveEx(cmd,mo,mo->x,mo->y,true,0.0);
+    } else if (perch_move && !door_cross) {
+        Bot_LedgeMoveAdaptive(cmd,mo,tx,ty,stop,3.0);
     } else if (ledge_protect && !door_cross) {
         Bot_LedgeMoveAdaptive(cmd,mo,tx,ty,stop,ledge_speed);
         /* Command prediction can brake even when the geometric segment passes.
