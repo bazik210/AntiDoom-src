@@ -19,7 +19,7 @@ void R_ExecuteSetViewSize(void);
 #define CHECK(x) do { if (!(x)) { printf("FAIL %d: %s\n",__LINE__,#x); return 1; } } while(0)
 int main(int argc,char **argv)
 {
-    char *wads[2]; player_t *p; ticcmd_t cmd; int t,attacks=0;
+    char *wads[2]; player_t *p; ticcmd_t cmd; int t,attacks=0,max_visible=0;
     if(argc!=2)return 2;
     myargc=argc;myargv=argv;wads[0]=argv[1];wads[1]=NULL;
     Z_Init();W_InitMultipleFiles(wads);gamemode=commercial;
@@ -67,11 +67,13 @@ int main(int argc,char **argv)
         for(t=0;t<35;++t) {
             Bot_BuildTiccmd(&cmd,p);p->cmd=cmd;
             if(cmd.buttons&BT_ATTACK)++attacks;
+            if(combat_visible_tics>max_visible)max_visible=combat_visible_tics;
             P_Ticker();++gametic;
         }
         CHECK(attacks>0);
+        CHECK(max_visible>=3);
     }
-    puts("PASS: empty-ammo bot punches a close monster");
+    puts("PASS: stable target confirmation engages without corner flicker");
     G_InitNew(sk_medium,1,1);p=&players[0];
     {
         mobj_t owner;

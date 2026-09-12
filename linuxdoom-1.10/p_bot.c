@@ -73,6 +73,7 @@ static int forced_progress_line = -1;
 static int forced_progress_until = 0;
 static mobj_t *combat_target, *ignored_target;
 static int combat_health, combat_progress, ignore_until;
+static int combat_visible_tics;
 static fixed_t probe_radius = BOT_RADIUS;
 static int commit_forward_until = 0;
 static int exit_commit_until = 0;
@@ -124,6 +125,7 @@ static boolean map04_crate_retry = false;
 static int map04_yellow_state = 0;
 static int story_target = -1;
 #include "p_bot_routes.h"
+static const bot_campaign_hint_t *campaign_hint;
 
 /* Combat hysteresis.  A target must be genuinely shootable to steal the
    navigation angle.  Short LOS flickers keep the old view angle, but never
@@ -1646,6 +1648,17 @@ static boolean Bot_ProgressSpecial(int s)
    describes what can become walkable after doors, lifts and tagged switches.
    Select the first action on a route to a missing key or exit, then leave
    exact approach points and movement to the existing collision planner. */
+static int Bot_CampaignPreferredKey(player_t *p)
+{
+    int i;
+    if (!campaign_hint) return -1;
+    for (i=0;i<3;++i) {
+        int key=campaign_hint->keys[i];
+        if (key>=0 && !Bot_HasKey(p,key)) return key;
+    }
+    return -1;
+}
+
 static int Bot_GenericProgress(player_t *p)
 {
     int *dist=malloc(numsectors*sizeof(int));
@@ -1654,8 +1667,15 @@ static int Bot_GenericProgress(player_t *p)
     int *previous=malloc(numsectors*sizeof(int));
 
     int i,j,k,start=p->mo->subsector->sector-sectors,goal_line=-1,best=INF;
+    int preferred_key=-1;
     thinker_t *th;
     generic_key=NULL;
+    preferred_key=Bot_CampaignPreferredKey(p);
+    if (campaign_hint && (campaign_hint->flags&BOT_HINT_CLEAR) &&
+        p->killcount<totalkills) {
+        free(dist);free(first);free(control);free(previous);
+        return -1;
+    }
     if (!dist || !first || !control || !previous) I_Error("Bot: progression graph allocation failed");
     for (i=0;i<numsectors;++i) { dist[i]=INF;first[i]=-1;control[i]=-1;previous[i]=-1; }
     for (i=0;i<numlines;++i) {
@@ -1737,10 +1757,12 @@ static int Bot_GenericProgress(player_t *p)
         if (m->sprite==SPR_RKEY || m->sprite==SPR_RSKU) key=it_redcard;
         if (m->sprite==SPR_YKEY || m->sprite==SPR_YSKU) key=it_yellowcard;
         v=m->subsector->sector-sectors;
-        if (key<0 || Bot_HasKey(p,key) || dist[v]>=best) continue;
+        if (key<0 || Bot_HasKey(p,key) || dist[v]>=best ||
+            (preferred_key>=0 && key!=preferred_key)) continue;
         best=dist[v];generic_key=m;goal_line=first[v];
     }
-    if (!generic_key) for (i=0;i<numlines;++i) if (Bot_IsExitSpecial(lines[i].special)) {
+    if (!generic_key && preferred_key<0)
+        for (i=0;i<numlines;++i) if (Bot_IsExitSpecial(lines[i].special)) {
         int v=lines[i].frontsector-sectors;
         if (dist[v]<best) { best=dist[v];goal_line=first[v]>=0 ? first[v] : i; }
     }
@@ -2269,7 +2291,14 @@ static void Bot_Plan(player_t *p)
         priority = Bot_ItemPriority(p,mo);
         if (priority!=INF && (mo->sprite==SPR_BKEY || mo->sprite==SPR_BSKU ||
             mo->sprite==SPR_RKEY || mo->sprite==SPR_RSKU ||
-            mo->sprite==SPR_YKEY || mo->sprite==SPR_YSKU)) priority=-45000;
+            mo->sprite==SPR_YKEY || mo->sprite==SPR_YSKU)) {
+            int item_key = (mo->sprite==SPR_BKEY || mo->sprite==SPR_BSKU) ? it_bluecard :
+                           (mo->sprite==SPR_RKEY || mo->sprite==SPR_RSKU) ? it_redcard :
+                                                                            it_yellowcard;
+            int preferred_key=Bot_CampaignPreferredKey(p);
+            priority = preferred_key<0 ? -45000 :
+                       item_key==preferred_key ? -60000 : -2500;
+        }
         if (mo==generic_key && priority!=INF) priority=-45000;
         if (priority!=INF && priority>-10000 && mo!=generic_key &&
             lift_commit_line<0 && !forced_item_active &&
@@ -2317,6 +2346,8 @@ static void Bot_Plan(player_t *p)
                 /* MAP05's hinted key route uses doors/lifts, not a gap jump.
                    Finish that prerequisite before searching off-mesh run-ups. */
                 if (traversal_item && (!map05_route || story_target<0) &&
+                    (!campaign_hint || (campaign_hint->flags&BOT_HINT_MOMENTUM) ||
+                     story_target<0) &&
                     goal.score>priority && leveltime>=next_run_search) {
                     next_run_search=leveltime+TICRATE;
                     Bot_RunCandidateToPoint(mo->x, mo->y, mo->z, priority);
@@ -2439,6 +2470,7 @@ void Bot_InitLevel(void)
     map03_route = Bot_MatchesRoute(&bot_routes[1]);
     map04_route = Bot_MatchesRoute(&bot_routes[2]);
     map05_route = Bot_MatchesRoute(&bot_routes[3]);
+    campaign_hint = Bot_FindCampaignHint();
     combat_pause_until = 0;
     weapon_switch_until = 0;
     next_run_search = 0;
@@ -2491,6 +2523,7 @@ void Bot_InitLevel(void)
     stuck_since = last_progress = 0; last_x = last_y = 0;
     next_ledge_diagnostic = 0;
     combat_target = ignored_target = NULL; combat_progress = ignore_until = 0;
+    combat_visible_tics = 0;
     combat_has_shot = false; combat_seen_until = combat_commit_until = 0; combat_last_aim = 0;
     combat_last_x = combat_last_y = 0;
     combat_strafe_side = 1; combat_strafe_until = 0; combat_strafe_pause_until = 0;
@@ -2695,6 +2728,7 @@ static mobj_t *Bot_Threat(player_t *p)
     if (best) {
         if (best != combat_target) {
             combat_target = best;
+            combat_visible_tics = 1;
             combat_health = best->health;
             combat_progress = leveltime;
             combat_strafe_side = ((best->x ^ best->y) & FRACUNIT) ? 1 : -1;
@@ -2705,9 +2739,12 @@ static mobj_t *Bot_Threat(player_t *p)
             combat_anchor_y = p->mo->y;
             combat_anchor_sector = p->mo->subsector->sector-sectors;
             combat_anchor_valid = true;
-        } else if (best->health < combat_health) {
-            combat_health = best->health;
-            combat_progress = leveltime;
+        } else {
+            if (combat_visible_tics < 8) ++combat_visible_tics;
+            if (best->health < combat_health) {
+                combat_health = best->health;
+                combat_progress = leveltime;
+            }
         }
 
         combat_has_shot = true;
@@ -2728,6 +2765,7 @@ static mobj_t *Bot_Threat(player_t *p)
             ignored_target = best;
             ignore_until = leveltime + 175;
             combat_target = NULL;
+            combat_visible_tics = 0;
             combat_has_shot = false;
             combat_seen_until = combat_commit_until = 0;
             combat_anchor_valid = false;
@@ -2739,6 +2777,7 @@ static mobj_t *Bot_Threat(player_t *p)
 
     if (combat_target && !current_alive) {
         combat_target = NULL;
+        combat_visible_tics = 0;
         combat_seen_until = combat_commit_until = 0;
         combat_anchor_valid = false;
         combat_strafe_until = combat_strafe_pause_until = 0;
@@ -2748,11 +2787,13 @@ static mobj_t *Bot_Threat(player_t *p)
     /* Preserve the engagement through a brief occlusion.  We intentionally do
        not return the hidden monster as a shootable threat; the caller only
        holds the last-known facing and waits for a real trace to reacquire it. */
+    combat_visible_tics = 0;
     if (combat_target && leveltime < combat_commit_until)
         return NULL;
 
     if (!combat_target || leveltime >= combat_seen_until) {
         combat_target = NULL;
+        combat_visible_tics = 0;
         combat_seen_until = combat_commit_until = 0;
         combat_anchor_valid = false;
         combat_strafe_until = combat_strafe_pause_until = 0;
@@ -3014,7 +3055,11 @@ static boolean Bot_RocketLaneSafe(mobj_t *mo, mobj_t *enemy, fixed_t dist)
 {
     fixed_t reach, tx, ty;
 
-    if (!mo || !enemy || dist < 512*FRACUNIT) return false;
+    if (!mo || !enemy) return false;
+    if (campaign_hint && (campaign_hint->flags&BOT_HINT_ICON) &&
+        enemy->type==MT_BOSSBRAIN && dist>=256*FRACUNIT)
+        return true;
+    if (dist < 512*FRACUNIT) return false;
     reach = dist < 192*FRACUNIT ? dist : 192*FRACUNIT;
     tx = mo->x + (fixed_t)((long long)(enemy->x-mo->x)*reach/dist);
     ty = mo->y + (fixed_t)((long long)(enemy->y-mo->y)*reach/dist);
@@ -3048,6 +3093,10 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
         Bot_RocketLaneSafe(p->mo,enemy,dist)) best = wp_missile;
     if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0) best = wp_plasma;
     else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40) best = wp_bfg;
+    if (campaign_hint && (campaign_hint->flags&BOT_HINT_ICON) && enemy &&
+        enemy->type==MT_BOSSBRAIN && p->weaponowned[wp_missile] &&
+        p->ammo[am_misl]>0)
+        best=wp_missile;
 
     cur_ammo = weaponinfo[p->readyweapon].ammo;
     cur_needed = p->readyweapon == wp_bfg ? 40 : p->readyweapon == wp_supershotgun ? 2 : 1;
@@ -4292,12 +4341,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean combat_moved = false;
 
         boolean urgent = p->health <= 50 || nearby_attackers >= 3;
+        boolean stable_shot = combat_visible_tics >= 3 || urgent;
         boolean supply_run = goal.type==GO_ITEM && (p->health<=50 || !ranged_ammo);
         boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
         /* Precision routes forbid strafing, not braking to defend ourselves. */
-        prefer_combat = ranged_ammo && d < (urgent ? 800 : 640)*FRACUNIT &&
+        prefer_combat = stable_shot && ranged_ammo && d < (urgent ? 800 : 640)*FRACUNIT &&
             (!map04_crate_route || urgent) &&
             !(route_drop && high_ground && !urgent) && !supply_run;
         can_fire = d < 800*FRACUNIT;
@@ -4309,7 +4359,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         /* When the target is almost overhead, its XY bearing can flip by 90-180
            degrees from a one-unit movement.  Do not let that pathological
            azimuth steal the first-person view; move out from underneath first. */
-        if (!(dz > 40*FRACUNIT && d < 96*FRACUNIT)) {
+        if (stable_shot && !(dz > 40*FRACUNIT && d < 96*FRACUNIT)) {
             if (!(map04_crate_route && Bot_HasKey(p,it_redcard)) || prefer_combat)
                 aim = combat_last_aim;
             /* Barrel safety was checked for the current weapon. Keep it;
@@ -4320,6 +4370,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 can_fire=false;
         } else {
             prefer_combat = false;
+            can_fire = false;
         }
 
         if (ranged_ammo && !supply_run && !combat_route_lock && !high_ground && !lift_riding && !door_combat_window &&
