@@ -2854,7 +2854,7 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
 {
     thinker_t *th;
     int risk=0, dangers=0;
-    double pathx[23], pathy[23];
+    double pathx[29], pathy[29];
     double vx=(double)mo->momx/FRACUNIT, vy=(double)mo->momy/FRACUNIT;
     int step;
 
@@ -2862,7 +2862,7 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
        movement controller's speed, acceleration limit and ground friction. */
     pathx[0]=(double)mo->x/FRACUNIT;
     pathy[0]=(double)mo->y/FRACUNIT;
-    for (step=1; step<=22; ++step) {
+    for (step=1; step<=28; ++step) {
         double dx=(double)px/FRACUNIT-pathx[step-1];
         double dy=(double)py/FRACUNIT-pathy[step-1];
         double len=sqrt(dx*dx+dy*dy), speed=fmin(7.0,len*0.35);
@@ -2890,7 +2890,7 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
         ry=(double)(m->y-mo->y)/FRACUNIT;
         if (rx*rx+ry*ry > 576.0*576.0) continue;
         hit=(double)(mo->radius+m->radius)/FRACUNIT+8.0;
-        for (step=0; step<22; ++step) {
+        for (step=0; step<28; ++step) {
             double fraction;
             int sample;
             rx=(double)m->x/FRACUNIT+(double)m->momx/FRACUNIT*step-pathx[step];
@@ -2910,9 +2910,9 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
             margin=clear-hit;
             if (margin<48.0) {
                 if (margin<=0.0)
-                    sample=120000+(int)((22.0-t)*2200.0);
+                    sample=120000+(int)((28.0-t)*2200.0);
                 else
-                    sample=(int)((48.0-margin)*900.0+(22.0-t)*160.0);
+                    sample=(int)((48.0-margin)*900.0+(28.0-t)*160.0);
                 if (sample>local) local=sample;
             }
         }
@@ -2929,7 +2929,7 @@ static int Bot_MissileRiskAt(mobj_t *mo, fixed_t px, fixed_t py, int *danger_cou
 static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
                                    fixed_t *outx, fixed_t *outy)
 {
-    static const int radii[] = { 24, 36, 48, 64 };
+    static const int radii[] = { 24, 40, 56, 72 };
     int current_risk, dangers, bestscore=INT_MAX;
     fixed_t anchorx, anchory, bestx=0, besty=0;
     int r,k;
@@ -2954,21 +2954,14 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
 
     missile_dodge_until=0;
 
-    /* If fighting, inherit the engagement anchor.  Otherwise create a temporary
-       local anchor so repeated dodges still cannot walk across the map. */
-    if (combat_anchor_valid) {
-        anchorx=combat_anchor_x; anchory=combat_anchor_y;
-    } else {
-        if (leveltime>=missile_anchor_until) {
-            missile_anchor_x=mo->x; missile_anchor_y=mo->y;
-            missile_anchor_until=leveltime+35;
-        }
-        anchorx=missile_anchor_x; anchory=missile_anchor_y;
-    }
+    /* Combat anchors can be several rooms old while navigation keeps moving.
+       Anchor each reaction at the real player position so a stale engagement
+       cannot reject every legal sidestep. */
+    anchorx=mo->x; anchory=mo->y;
 
     /* A tiny recovery pause prevents left/right machine-gun oscillation.  Very
        high immediate risk is allowed to break the pause. */
-    if (leveltime < missile_dodge_pause_until && current_risk < 120000)
+    if (leveltime < missile_dodge_pause_until && current_risk < 90000)
         return false;
 
     for (r=0; r<(int)(sizeof(radii)/sizeof(radii[0])); ++r) {
@@ -3009,10 +3002,23 @@ static boolean Bot_ProjectileDodge(mobj_t *mo, fixed_t navx, fixed_t navy,
         return false;
 
     missile_dodge_tx=bestx; missile_dodge_ty=besty;
-    missile_dodge_until=leveltime+9;
-    missile_dodge_pause_until=leveltime+14;
+    missile_dodge_until=leveltime+12;
+    missile_dodge_pause_until=leveltime+12;
     *outx=bestx; *outy=besty;
     return true;
+}
+
+/* Rockets need player-width clearance in front of the muzzle. Hitscan LOS can
+   pass through a window even when the rocket immediately clips its sill. */
+static boolean Bot_RocketLaneSafe(mobj_t *mo, mobj_t *enemy, fixed_t dist)
+{
+    fixed_t reach, tx, ty;
+
+    if (!mo || !enemy || dist < 512*FRACUNIT) return false;
+    reach = dist < 192*FRACUNIT ? dist : 192*FRACUNIT;
+    tx = mo->x + (fixed_t)((long long)(enemy->x-mo->x)*reach/dist);
+    ty = mo->y + (fixed_t)((long long)(enemy->y-mo->y)*reach/dist);
+    return Bot_WalkStable(mo->x,mo->y,mo->z,tx,ty,mo,false);
 }
 
 static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
@@ -3038,7 +3044,8 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
         if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2) best = wp_supershotgun;
     }
 
-    if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && dist > 400*FRACUNIT) best = wp_missile;
+    if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 &&
+        Bot_RocketLaneSafe(p->mo,enemy,dist)) best = wp_missile;
     if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0) best = wp_plasma;
     else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40) best = wp_bfg;
 
@@ -3049,7 +3056,8 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 
     if (p->pendingweapon!=wp_nochange) return;
     if (cur_ammo!=am_noammo && p->ammo[cur_ammo]>=cur_needed) {
-        boolean unsafe=p->readyweapon==wp_missile && dist<192*FRACUNIT;
+        boolean unsafe=p->readyweapon==wp_missile &&
+            !Bot_RocketLaneSafe(p->mo,enemy,dist);
         boolean ineffective=p->readyweapon==wp_supershotgun && dist>384*FRACUNIT;
         boolean modest_enemy=enemy && enemy->health<=70 &&
             enemy->type!=MT_CHAINGUY && nearby_attackers<3;
@@ -3496,7 +3504,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     {
         ammotype_t cur_ammo = weaponinfo[p->readyweapon].ammo;
         int cur_need = p->readyweapon==wp_bfg ? 40 : p->readyweapon==wp_supershotgun ? 2 : 1;
-        if (cur_ammo != am_noammo && p->ammo[cur_ammo] < cur_need)
+        if ((cur_ammo != am_noammo && p->ammo[cur_ammo] < cur_need) ||
+            ((p->readyweapon==wp_fist || p->readyweapon==wp_chainsaw) &&
+             Bot_HasRangedAmmo(p)))
             Bot_Weapon(cmd, p, 400*FRACUNIT, NULL);
     }
     if (map04_route && Bot_HasKey(p,it_bluecard) && !Bot_HasKey(p,it_yellowcard)) {
@@ -4305,6 +4315,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             /* Barrel safety was checked for the current weapon. Keep it;
                switching here would invalidate its spread/blast calculation. */
             if (threat->type != MT_BARREL) Bot_Weapon(cmd, p, d, threat);
+            if (p->readyweapon==wp_missile &&
+                !Bot_RocketLaneSafe(mo,threat,d))
+                can_fire=false;
         } else {
             prefer_combat = false;
         }
@@ -4454,7 +4467,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        while operating/crossing a door. */
     if ((ranged_ammo || !(threat && can_fire &&
          P_AproxDistance(threat->x-mo->x,threat->y-mo->y) < MELEERANGE)) &&
-        !combat_route_lock && !perch_move && !ready_to_run && !interaction_lock &&
+        !ready_to_run && !interaction_lock &&
         !door_cross && !door_waiting && !door_fighting && !lift_riding &&
         !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
