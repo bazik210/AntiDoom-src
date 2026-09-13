@@ -78,6 +78,52 @@ static int combat_visible_tics;
 static fixed_t probe_radius = BOT_RADIUS;
 static int commit_forward_until = 0;
 static int exit_commit_until = 0;
+static int Bot_TotalAvailableDamage(player_t *p);
+static boolean Bot_KeyViable(player_t *p, mobj_t *key_item)
+{
+    thinker_t *th;
+    int total_hp = 0;
+    int heavy_count = 0;
+    if (!key_item) return true;
+    for (th = thinkercap.next; th != &thinkercap; th = th->next) {
+        mobj_t *m;
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+        m = (mobj_t *)th;
+        if ((m->flags & MF_COUNTKILL) && m->health > 0) {
+            if (P_AproxDistance(m->x - key_item->x, m->y - key_item->y) < 800*FRACUNIT) {
+                if (m->type == MT_CYBORG || m->type == MT_SPIDER ||
+                    m->type == MT_BRUISER || m->type == MT_KNIGHT ||
+                    m->type == MT_FATSO || m->type == MT_VILE || m->health > 300) {
+                    heavy_count++;
+                    total_hp += m->health;
+                }
+            }
+        }
+    }
+    if (heavy_count > 0) {
+        int available_dmg = Bot_TotalAvailableDamage(p);
+        boolean has_heavy = (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 8) ||
+                            (p->weaponowned[wp_shotgun] && p->ammo[am_shell] >= 16) ||
+                            (p->weaponowned[wp_chaingun] && p->ammo[am_clip] >= 60) ||
+                            (p->weaponowned[wp_plasma] && p->ammo[am_cell] >= 40) ||
+                            (p->weaponowned[wp_bfg] && p->ammo[am_cell] >= 40) ||
+                            (p->weaponowned[wp_missile] && p->ammo[am_misl] >= 4);
+        if (!has_heavy || available_dmg < total_hp) return false;
+    }
+    return true;
+}
+
+static boolean Bot_CombatViable(player_t *p, mobj_t *threat, fixed_t dist);
+static int unviable_danger_sector = -1;
+static int unviable_danger_door_sector = -1;
+static int unviable_danger_until = 0;
+static fixed_t unviable_danger_x = 0, unviable_danger_y = 0;
+static int evacuate_until = 0;
+static int evacuate_door = -1;
+static fixed_t evacuate_safe_x = 0, evacuate_safe_y = 0;
+static int last_door_crossed = -1;
+static int last_door_side = 0;
+static fixed_t last_door_safe_x = 0, last_door_safe_y = 0;
 
 /* After a remote switch/platform button, do not instantly abandon the room for
    old ammo.  Briefly watch the interaction, then keep the next decisions local
@@ -1923,7 +1969,12 @@ static int Bot_GenericProgress(player_t *p)
         if (m->sprite==SPR_YKEY || m->sprite==SPR_YSKU) key=it_yellowcard;
         v=m->subsector->sector-sectors;
         if (key<0 || Bot_HasKey(p,key) || dist[v]>=best ||
-            (preferred_key>=0 && key!=preferred_key)) continue;
+            (preferred_key>=0 && key!=preferred_key) || !Bot_KeyViable(p, m)) continue;
+        if (leveltime < unviable_danger_until) {
+            if (v == unviable_danger_sector ||
+                P_AproxDistance(m->x-unviable_danger_x, m->y-unviable_danger_y) < 1200*FRACUNIT)
+                continue;
+        }
         best=dist[v];generic_key=m;goal_line=first[v];
     }
     if (!generic_key && preferred_key<0)
@@ -2192,6 +2243,7 @@ static void Bot_Plan(player_t *p)
     generic_key=NULL;
     if (!map02_route && !map03_route && !map04_route && !map05_route &&
         (!campaign_hint || campaign_hint->map != 6)) story_target=Bot_GenericProgress(p);
+    if (leveltime < evacuate_until) story_target = -1;
     if (story_target >= 0) {
         story_x = lines[story_target].v1->x + lines[story_target].dx/2;
         story_y = lines[story_target].v1->y + lines[story_target].dy/2;
@@ -2325,6 +2377,20 @@ static void Bot_Plan(player_t *p)
             (i == 86 || i == 87 || i == 344 || i == 345)) continue;
         double dx = (double)li->dx, dy = (double)li->dy, len = sqrt(dx*dx + dy*dy);
         if (!special || !Bot_ProgressSpecial(special) || len < FRACUNIT || line_retry[i] > leveltime || !Bot_HasKey(p,Bot_Key(special))) continue;
+        if (leveltime < unviable_danger_until && leveltime >= evacuate_until) {
+            if (li->backsector) {
+                int bsec = (int)(li->backsector - sectors);
+                if (bsec == unviable_danger_sector || bsec == unviable_danger_door_sector) continue;
+            }
+            if (li->frontsector) {
+                int fsec = (int)(li->frontsector - sectors);
+                if (fsec == unviable_danger_sector || fsec == unviable_danger_door_sector) continue;
+            }
+            fixed_t lmidx = (li->v1->x + li->v2->x) / 2;
+            fixed_t lmidy = (li->v1->y + li->v2->y) / 2;
+            if (P_AproxDistance(lmidx - unviable_danger_x, lmidy - unviable_danger_y) < 600*FRACUNIT)
+                continue;
+        }
         if (Bot_UseSpecial(special)) {
             int used_age = line_used[i] ? leveltime-line_used[i] : INT_MAX;
 
@@ -2375,7 +2441,9 @@ static void Bot_Plan(player_t *p)
                generic exploration. Attempts are only a mild tie-breaker. */
             priority = special==11 ? -20000 : special==51 ? -15000 :
                        250 + (line_tries[i] > 4 ? 4 : line_tries[i]) * 250;
-            if (i == story_target) priority = -30000;
+            if (leveltime < evacuate_until && evacuate_door >= 0 && i == evacuate_door)
+                priority = -60000;
+            else if (i == story_target) priority = -30000;
             if (map03_route && progress_sector >= 0 &&
                 ((li->frontsector && li->frontsector == &sectors[progress_sector]) ||
                  (li->backsector && li->backsector == &sectors[progress_sector])))
@@ -2518,7 +2586,17 @@ static void Bot_Plan(player_t *p)
             priority = preferred_key<0 ? -45000 :
                        item_key==preferred_key ? -60000 : -2500;
         }
-        if (mo==generic_key && priority!=INF) priority=-45000;
+        if (mo==generic_key && priority!=INF) {
+            if (!Bot_KeyViable(p, mo)) priority = INF;
+            else priority=-45000;
+        }
+        if (priority != INF && (leveltime < evacuate_until || leveltime < unviable_danger_until)) {
+            int isec = (int)(mo->subsector->sector - sectors);
+            if (leveltime < evacuate_until || isec == unviable_danger_sector || isec == unviable_danger_door_sector ||
+                P_AproxDistance(mo->x-unviable_danger_x, mo->y-unviable_danger_y) < 900*FRACUNIT) {
+                priority = INF;
+            }
+        }
         if (priority!=INF && priority>-10000 && mo!=generic_key &&
             lift_commit_line<0 && !forced_item_active &&
             P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<350*FRACUNIT &&
@@ -2643,6 +2721,21 @@ static void Bot_Plan(player_t *p)
         } else if (prefer_forward) {
             score += 2500;
         }
+        if (leveltime < evacuate_until || leveltime < unviable_danger_until) {
+            fixed_t to_danger = P_AproxDistance(Bot_X(i)-unviable_danger_x, Bot_Y(i)-unviable_danger_y);
+            if (cells[i].sector == unviable_danger_sector || cells[i].sector == unviable_danger_door_sector || to_danger < 900*FRACUNIT) {
+                score += 100000;
+            } else if (leveltime < evacuate_until) {
+                if (evacuate_door >= 0) {
+                    fixed_t d_safe = P_AproxDistance(Bot_X(i)-evacuate_safe_x, Bot_Y(i)-evacuate_safe_y);
+                    score = cells[i].dist + (d_safe / FRACUNIT) * 10 - 50000;
+                } else {
+                    score = cells[i].dist - (to_danger / FRACUNIT) * 30 - 30000;
+                }
+            } else {
+                score -= to_danger / (4*FRACUNIT);
+            }
+        }
         if (score < goal.score) {
             goal.type = GO_EXPLORE; goal.line = -1; goal.cell = i; goal.x = Bot_X(i); goal.y = Bot_Y(i); goal.score = score;
         }
@@ -2745,6 +2838,16 @@ void Bot_InitLevel(void)
     next_key_memory_scan = 0;
     had_ranged_ammo = true;
     rearm_mode = false;
+    unviable_danger_sector = -1;
+    unviable_danger_door_sector = -1;
+    unviable_danger_until = 0;
+    unviable_danger_x = unviable_danger_y = 0;
+    evacuate_until = 0;
+    evacuate_door = -1;
+    evacuate_safe_x = evacuate_safe_y = 0;
+    last_door_crossed = -1;
+    last_door_side = 0;
+    last_door_safe_x = last_door_safe_y = 0;
     key_progress_mask = 0;
     stuck_since = last_progress = 0; last_x = last_y = 0;
     next_ledge_diagnostic = 0;
@@ -4338,6 +4441,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         if (P_PointOnLineSide(mo->x,mo->y,&lines[door_commit_line]) != door_commit_side) {
             int crossed_line=door_commit_line;
             I_Log("Bot: crossed door line=%d\n",crossed_line);
+            last_door_crossed = crossed_line;
+            last_door_side = door_commit_side;
+            last_door_safe_x = door_ax;
+            last_door_safe_y = door_ay;
             if (map03_route && crossed_line == 458)
                 map03_red_door_done = true;
             if (map03_route &&
@@ -4436,8 +4543,48 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     last_x = mo->x; last_y = mo->y;
     /* Finish the already selected door crossing before doing another flood
        and off-mesh search. Replanning here can pause an otherwise open door. */
+    if (evacuate_until > 0 && last_door_crossed >= 0) {
+        if (P_PointOnLineSide(mo->x, mo->y, &lines[last_door_crossed]) == last_door_side ||
+            P_AproxDistance(mo->x - last_door_safe_x, mo->y - last_door_safe_y) < 64*FRACUNIT) {
+            I_Log("Bot: successfully evacuated room through door %d\n", last_door_crossed);
+            line_retry[last_door_crossed] = leveltime + 35*TICRATE;
+            evacuate_until = 0;
+            evacuate_door = -1;
+            last_door_crossed = -1;
+            goal.type = GO_NONE;
+            next_plan = 0;
+        }
+    }
+
     /* Keep the selected route through combat and brief LOS flicker. */
     threat = Bot_Threat(p);
+    if (threat) {
+        fixed_t d_threat = P_AproxDistance(threat->x-mo->x, threat->y-mo->y);
+        if (!Bot_CombatViable(p, threat, d_threat)) {
+            unviable_danger_sector = (int)(threat->subsector->sector - sectors);
+            unviable_danger_until = leveltime + 30*TICRATE;
+            unviable_danger_x = threat->x;
+            unviable_danger_y = threat->y;
+            evacuate_until = leveltime + 10*TICRATE;
+            evacuate_door = last_door_crossed;
+            evacuate_safe_x = last_door_safe_x;
+            evacuate_safe_y = last_door_safe_y;
+            combat_pause_until = 0;
+            if (door_commit_line >= 0) {
+                int bad_door = door_commit_line;
+                if (lines[bad_door].backsector) {
+                    unviable_danger_door_sector = (int)(lines[bad_door].backsector - sectors);
+                }
+                line_retry[bad_door] = leveltime + 30*TICRATE;
+                Bot_ClearDoorCommit();
+                door_combat_window = false;
+            }
+            if (goal.type != GO_NONE && (goal.type == GO_ITEM || (goal.type == GO_EXPLORE && P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 700*FRACUNIT))) {
+                goal.type = GO_NONE;
+                next_plan = 0;
+            }
+        }
+    }
     if (leveltime >= next_plan && door_commit_line < 0 && !lift_riding &&
         leveltime >= combat_pause_until)
         Bot_Plan(p);
@@ -4788,13 +4935,37 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         }
 
         if (actor_open) {
-            /* The doorway is physically traversable, but an enemy visible from
-               here must still be allowed to steal aim/movement.  The old
-               interaction_lock + door_cross combination made the bot ignore a
-               monster literally standing in front of the open door. */
-            tx=door_tx; ty=door_ty; stop=false; door_cross=true;
-            interaction_lock = false;
-            door_combat_window = true;
+            fixed_t d_threat = threat ? P_AproxDistance(threat->x-mo->x, threat->y-mo->y) : INF;
+            if (threat && !Bot_CombatViable(p, threat, d_threat)) {
+                /* An unviable death trap is revealed behind the door!
+                   Do not cross into the room! Abort door, blacklist it, and back out! */
+                int bad_door = door_commit_line;
+                unviable_danger_sector = (int)(threat->subsector->sector - sectors);
+                unviable_danger_until = leveltime + 25*TICRATE;
+                unviable_danger_x = threat->x;
+                unviable_danger_y = threat->y;
+                if (lines[bad_door].backsector) {
+                    int bsec = (int)(lines[bad_door].backsector - sectors);
+                    unviable_danger_door_sector = bsec;
+                    for (i = 0; i < numlines; ++i) {
+                        if (lines[i].backsector && (int)(lines[i].backsector - sectors) == bsec) {
+                            line_retry[i] = leveltime + 30*TICRATE;
+                        }
+                    }
+                }
+                line_retry[bad_door] = leveltime + 30*TICRATE;
+                Bot_ClearDoorCommit();
+                door_combat_window = false;
+                next_plan = 0;
+            } else {
+                /* The doorway is physically traversable, but an enemy visible from
+                   here must still be allowed to steal aim/movement.  The old
+                   interaction_lock + door_cross combination made the bot ignore a
+                   monster literally standing in front of the open door. */
+                tx=door_tx; ty=door_ty; stop=false; door_cross=true;
+                interaction_lock = false;
+                door_combat_window = true;
+            }
         } else if (!geometry_open) {
             /* Door itself is still shut: face it, wait/re-use.  While the solid
                door blocks the route there is no useful room-side combat trace
@@ -4855,6 +5026,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
        monster.  This prevents path-angle / monster-angle ping-pong at corners. */
     boolean combat_view_grace = (!threat && combat_target && leveltime < combat_commit_until);
     boolean prefer_combat = false;
+    boolean combat_viable = true;
     boolean ranged_ammo = Bot_HasRangedAmmo(p);
     boolean can_fire = false;
 
@@ -4878,7 +5050,29 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
-        boolean combat_viable = Bot_CombatViable(p, threat, d);
+        combat_viable = Bot_CombatViable(p, threat, d);
+        if (!combat_viable && threat) {
+            unviable_danger_sector = (int)(threat->subsector->sector - sectors);
+            unviable_danger_until = leveltime + 25*TICRATE;
+            unviable_danger_x = threat->x;
+            unviable_danger_y = threat->y;
+            if (door_commit_line >= 0) {
+                int bad_door = door_commit_line;
+                if (lines[bad_door].backsector) {
+                    int bsec = (int)(lines[bad_door].backsector - sectors);
+                    unviable_danger_door_sector = bsec;
+                    for (i = 0; i < numlines; ++i) {
+                        if (lines[i].backsector && (int)(lines[i].backsector - sectors) == bsec) {
+                            line_retry[i] = leveltime + 30*TICRATE;
+                        }
+                    }
+                }
+                line_retry[bad_door] = leveltime + 30*TICRATE;
+                Bot_ClearDoorCommit();
+                door_combat_window = false;
+                next_plan = 0;
+            }
+        }
         /* Precision routes forbid strafing, not braking to defend ourselves. */
         prefer_combat = stable_shot && ranged_ammo && combat_viable && d < (urgent ? 800 : 640)*FRACUNIT &&
             (!map04_crate_route || urgent) &&
@@ -4921,8 +5115,18 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             can_fire = false;
         }
 
-        if (ranged_ammo && !supply_run && !combat_route_lock && !high_ground && !lift_riding && !door_combat_window &&
-            (threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT) {
+        boolean retreat_needed = (!combat_viable && threat) ||
+                                 ((threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT);
+        if (!combat_viable && threat && goal.type == GO_ITEM &&
+            P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 750*FRACUNIT) {
+            goal.type = GO_NONE;
+            next_plan = 0;
+        }
+        if (leveltime < evacuate_until && goal.type != GO_NONE) {
+            tx = path_step < path_len ? Bot_X(path[path_step]) : goal.x;
+            ty = path_step < path_len ? Bot_Y(path[path_step]) : goal.y;
+            stop = false;
+        } else if (retreat_needed && !combat_route_lock && !high_ground && !lift_riding) {
             fixed_t retreatx, retreaty;
             if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
                                        &retreatx,&retreaty)) {
@@ -5087,7 +5291,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
            instead of instantly walking into the room where the monster vanished. */
         aim = R_PointToAngle2(mo->x,mo->y,combat_last_x,combat_last_y);
         if (leveltime < combat_pause_until) stop = true;
-        if (door_combat_window) {
+        if (door_combat_window && combat_viable) {
             /* Last-known aim may be useful, but an open doorway must keep
                crossing when the monster has slipped around its side. */
             tx=door_tx; ty=door_ty;
