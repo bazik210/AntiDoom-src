@@ -905,14 +905,26 @@ static void Bot_Flood(player_t *player)
     static const int dx[8] = {1,-1,0,0,1,1,-1,-1};
     static const int dy[8] = {0,0,1,-1,1,-1,1,-1};
     int start, i;
-    boolean protect_ledge = (map02_route || map04_crate_route) && forced_item_active &&
-                            leveltime < forced_item_until;
+    boolean protect_ledge = (map04_crate_route ||
+                             (map02_route &&
+                              P_AproxDistance(player->mo->x-forced_item_x,
+                                               player->mo->y-forced_item_y) <
+                              256*FRACUNIT)) &&
+                            forced_item_active && leveltime < forced_item_until;
     Bot_RefreshGeometry();
     ++stamp; heap_count = 0;
     if (protect_ledge) {
         start = Bot_NearLedgeStart(player->mo);
-        if (start < 0 && !map02_route)
-            start = Bot_NearCell(player->mo->x,player->mo->y,player->mo->z,false);
+        if (start < 0) {
+            int fallback=Bot_NearCell(player->mo->x,player->mo->y,
+                                      player->mo->z,false);
+            /* A momentum landing can be between grid centres. Recover the
+               nearest supported cell, but never reintroduce a drop shortcut. */
+            if (fallback>=0 && cells[fallback].ledge_safe &&
+                Bot_WalkLedgeSafe(player->mo->x,player->mo->y,player->mo->z,
+                                  Bot_X(fallback),Bot_Y(fallback),player->mo,false))
+                start=fallback;
+        }
     } else {
         start = Bot_NearCell(player->mo->x, player->mo->y, player->mo->z, false);
     }
@@ -4094,7 +4106,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             plat_t *plat = NULL;
             int p_i;
             for (p_i = 0; p_i < MAXPLATS; ++p_i) {
-                if (activeplats[p_i] && activeplats[p_i]->sector == &sectors[cursec]) {
+                if (activeplats[p_i] && (activeplats[p_i]->sector == &sectors[cursec] ||
+                                         Bot_LiftSectorMatches((int)(activeplats[p_i]->sector - sectors)))) {
                     plat = activeplats[p_i];
                     break;
                 }
@@ -4108,10 +4121,11 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 if (!sectors[cursec].specialdata &&
                     !(map04_route && lift_commit_line == 408 && sectors[38].specialdata)) {
                     ride_complete = true;
-                } else if (is_descending && plat->sector->floorheight <= plat->low + 4*FRACUNIT) {
-                    ride_complete = true;
-                } else if (!is_descending && plat->sector->floorheight >= plat->high - 4*FRACUNIT) {
-                    ride_complete = true;
+                } else if (plat && plat->sector) {
+                    if (is_descending && plat->sector->floorheight <= plat->low + 4*FRACUNIT)
+                        ride_complete = true;
+                    else if (!is_descending && plat->sector->floorheight >= plat->high - 4*FRACUNIT)
+                        ride_complete = true;
                 }
 
                 if (!ride_complete) {
@@ -4289,7 +4303,18 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         }
     } else if (door_commit_line >= 0) {
         int expired_line=door_commit_line;
+        fixed_t crossx=door_tx,crossy=door_ty;
         I_Log("Bot: door commit timeout line=%d\n",expired_line);
+
+        /* The door may be fully open while a side monster obscures the first
+           actor-aware probe. Keep the existing crossing transaction instead
+           of pressing USE again and resetting the door cycle. */
+        if (Bot_FindDoorCrossPoint(mo,expired_line,false,&crossx,&crossy)) {
+            door_tx=crossx;door_ty=crossy;
+            door_commit_until=leveltime+70;
+            next_plan=leveltime+1;
+            I_Log("Bot: keep open door crossing line=%d\n",expired_line);
+        } else {
         Bot_ClearDoorCommit();
 
         /* A door we successfully operated remains the way out of this room.
@@ -4298,6 +4323,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         if (expired_line >= 0 && expired_line < numlines)
             line_retry[expired_line]=0;
         next_plan=leveltime+1;
+        }
     }
 
     sec = mo->subsector->sector-sectors;
@@ -4348,6 +4374,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         Bot_Plan(p);
     ledge_protect = (map02_route && forced_item_active && leveltime < forced_item_until &&
                      goal.type == GO_ITEM &&
+                     P_AproxDistance(mo->x-forced_item_x,mo->y-forced_item_y) <
+                     256*FRACUNIT &&
                      P_AproxDistance(goal.aimx-forced_item_x,goal.aimy-forced_item_y) < 64*FRACUNIT);
 
     combat_route_lock = map04_crate_route || ledge_protect ||
@@ -4705,21 +4733,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             tx=door_ax; ty=door_ay; stop=true; door_waiting=true;
             interaction_lock = true;
         } else {
-            /* Geometry is open but a solid actor blocks the tested crossing.
-               Preserve this exact door commit and fight instead of selecting
-               another navigation goal. */
-            tx=door_ax; ty=door_ay; stop=true;
-            if (!threat) {
-                fixed_t d=P_AproxDistance(door_ax-mo->x,door_ay-mo->y);
-                if (d>4*FRACUNIT) {
-                    fixed_t step=d<8*FRACUNIT ? d : 8*FRACUNIT;
-                    fixed_t nx=mo->x+(fixed_t)((long long)(door_ax-mo->x)*step/d);
-                    fixed_t ny=mo->y+(fixed_t)((long long)(door_ay-mo->y)*step/d);
-                    if (Bot_WalkStable(mo->x,mo->y,mo->z,nx,ny,mo,true)) {
-                        tx=nx;ty=ny;stop=false;
-                    }
-                }
-            }
+            /* Geometry is open but an actor occupies our first crossing probe.
+               Keep pressing toward the far-side point; freezing at the switch
+               let a hidden side zombie consume the entire door timeout. */
+            tx=door_tx; ty=door_ty; stop=false; door_cross=true;
             interaction_lock = false;
             door_combat_window = true;
         }
