@@ -3753,11 +3753,11 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
             /* Allow switch to chaingun to stunlock chaingunner */
         } else {
             /* Normal combat: hold raised gun within effective range instead of flapping */
-            if (p->readyweapon == wp_plasma && plasma_clear) return;
-            if (p->readyweapon == wp_supershotgun && dist < 480*FRACUNIT &&
-                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 30)) return;
-            if (p->readyweapon == wp_chaingun && dist > 180*FRACUNIT &&
-                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 30)) return;
+            if (p->readyweapon == wp_plasma && p->ammo[am_cell] > 0) return;
+            if (p->readyweapon == wp_supershotgun && (nearby_attackers >= 2 || dist < 480*FRACUNIT) &&
+                (!p->weaponowned[wp_plasma] || p->ammo[am_cell] < 30)) return;
+            if (p->readyweapon == wp_chaingun && (nearby_attackers >= 2 || dist > 180*FRACUNIT) &&
+                (!p->weaponowned[wp_plasma] || p->ammo[am_cell] < 30)) return;
             if (p->readyweapon == wp_shotgun && dist < 640*FRACUNIT &&
                 (!p->weaponowned[wp_supershotgun] || dist > 350*FRACUNIT)) return;
         }
@@ -3766,7 +3766,7 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
     if (best != p->readyweapon && p->pendingweapon == wp_nochange) {
         int slot = best == wp_supershotgun ? wp_shotgun : best;
         cmd->buttons |= BT_CHANGE | (slot << BT_WEAPONSHIFT);
-        weapon_switch_until = leveltime + 45;
+        weapon_switch_until = leveltime + (nearby_attackers >= 2 ? 80 : 45);
     }
 }
 
@@ -5211,9 +5211,16 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             can_fire = false;
         }
 
+        boolean heavy_close = (threat && (threat->type == MT_KNIGHT || threat->type == MT_BRUISER ||
+                               threat->type == MT_HEAD || threat->type == MT_FATSO ||
+                               threat->type == MT_UNDEAD || threat->type == MT_BABY ||
+                               threat->type == MT_VILE || threat->type == MT_CYBORG ||
+                               threat->type == MT_SPIDER || threat->type == MT_PAIN) && d < 280*FRACUNIT);
+        boolean melee_close = (threat && (threat->type == MT_SERGEANT || threat->type == MT_SHADOWS ||
+                               threat->type == MT_SKULL) && d < 180*FRACUNIT);
         boolean retreat_needed = !p->powers[pw_invulnerability] &&
-                                 ((!combat_viable && threat) ||
-                                  ((threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT));
+                                 ((!combat_viable && threat) || heavy_close || melee_close ||
+                                  ((threat && threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT));
         if (!combat_viable && threat && goal.type == GO_ITEM && goal.score > -30000 &&
             P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 750*FRACUNIT) {
             goal.type = GO_NONE;
