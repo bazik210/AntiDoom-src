@@ -1705,6 +1705,19 @@ static mobj_t *Bot_BlueKey(void)
     return NULL;
 }
 
+static boolean Bot_TaggedDoorOpen(int tag)
+{
+    int i;
+    if (!tag) return false;
+    for (i = 0; i < numsectors; ++i) {
+        if (sectors[i].tag == tag &&
+            sectors[i].ceilingheight - sectors[i].floorheight >= 56*FRACUNIT &&
+            !sectors[i].specialdata)
+            return true;
+    }
+    return false;
+}
+
 static void Bot_CheckPendingUse(void)
 {
     line_t *li;
@@ -1717,7 +1730,8 @@ static void Bot_CheckPendingUse(void)
     }
 
     li = &lines[pending_use_line];
-    fired = li->special != pending_use_special || Bot_LineActionActive(li);
+    fired = li->special != pending_use_special || Bot_LineActionActive(li) ||
+            (li->tag && Bot_TaggedDoorOpen(li->tag));
     if (fired) {
         if (pending_use_line == lift_commit_line)
             Bot_ResolveLiftCommit(li);
@@ -1772,8 +1786,27 @@ static void Bot_CheckPendingUse(void)
 
         /* A real tagged action just started. Keep the bot nearby long enough to
            observe/use the result instead of immediately shopping for ammo. */
-        if (pending_use_line == post_use_line && leveltime + 105 > post_use_local_until)
-            post_use_local_until = leveltime + 105;
+        if (pending_use_line == post_use_line) {
+            boolean local_action = (!li->tag);
+            if (li->tag) {
+                int si;
+                for (si = 0; si < numsectors; ++si) {
+                    if (sectors[si].tag == li->tag &&
+                        P_AproxDistance(sectors[si].soundorg.x - post_use_x,
+                                        sectors[si].soundorg.y - post_use_y) < 400*FRACUNIT) {
+                        local_action = true;
+                        break;
+                    }
+                }
+            }
+            if (local_action) {
+                if (leveltime + 105 > post_use_local_until)
+                    post_use_local_until = leveltime + 105;
+            } else {
+                post_use_local_until = 0;
+                commit_forward_until = 0;
+            }
+        }
 
         /* A remote floor/door switch is useful because it changes a tagged
            sector elsewhere. Keep that sector as the next destination instead
@@ -2412,6 +2445,8 @@ static void Bot_Plan(player_t *p)
                penalty so unexplored space, keys and new switches win.  Manual
                doors and exits have their own continuation semantics. */
             if (i != story_target && !Bot_UseDoor(li) && !Bot_IsExitSpecial(special) && line_used[i]) {
+                if (li->tag && Bot_TaggedDoorOpen(li->tag)) continue;
+                if (!Bot_LiftUseSpecial(special)) continue;
                 if (used_age < USED_SWITCH_HARD_COOLDOWN) continue;
             }
 
@@ -2499,6 +2534,7 @@ static void Bot_Plan(player_t *p)
             /* Teleport triggers are progression, not optional exploration.
                Prefer reaching them over nearby repeatable blue doors. */
             priority = special==52 ? -20000 : special==124 ? -15000 :
+                       (special==39 || special==97) ? (400+line_tries[i]*500) :
                        800+line_tries[i]*1000;
             if (i == story_target) priority = -30000;
             if (map03_route && progress_sector >= 0 &&
@@ -2537,11 +2573,23 @@ static void Bot_Plan(player_t *p)
                 /* Doom teleports only on a front-to-back crossing. The player
                    may be on the back half-plane in a DIFFERENT room: that is
                    not a reason to reverse the desired crossing direction. */
-                fixed_t ax=li->v1->x+li->dx/2, ay=li->v1->y+li->dy/2;
-                int side=(p->mo->subsector->sector == li->backsector &&
-                          P_PointOnLineSide(p->mo->x,p->mo->y,li)) ? 1 : -1;
-                Bot_Candidate(GO_WALK,ax+(fixed_t)(side*dy/len*32*FRACUNIT),
-                    ay-(fixed_t)(side*dx/len*32*FRACUNIT),ax,ay,i,priority);
+                int step_depths[] = { 16, 24, 12, 32 };
+                int sidx;
+                boolean cand_ok = false;
+                for (n = 1; n <= 3 && !cand_ok; ++n) {
+                    fixed_t ax = li->v1->x + (fixed_t)((long long)li->dx*n/4);
+                    fixed_t ay = li->v1->y + (fixed_t)((long long)li->dy*n/4);
+                    int side = (p->mo->subsector->sector == li->backsector &&
+                                P_PointOnLineSide(p->mo->x,p->mo->y,li)) ? 1 : -1;
+                    for (sidx = 0; sidx < 4; ++sidx) {
+                        int depth = step_depths[sidx];
+                        if (Bot_Candidate(GO_WALK, ax + (fixed_t)(side*dy/len*depth*FRACUNIT),
+                                          ay - (fixed_t)(side*dx/len*depth*FRACUNIT), ax, ay, i, priority)) {
+                            cand_ok = true;
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
             for (n = 1; n <= 3; ++n) {
@@ -3113,7 +3161,15 @@ static mobj_t *Bot_Threat(player_t *p)
            Only a real weapon trace is allowed to acquire or replace a target. */
         angle = R_PointToAngle2(p->mo->x,p->mo->y,mo->x,mo->y);
         P_AimLineAttack(p->mo,angle,dist+64*FRACUNIT);
-        if (linetarget != mo) continue;
+        if (linetarget != mo) {
+            if (mo == combat_target && linetarget &&
+                (linetarget->flags & MF_SHOOTABLE) && linetarget->health > 0 &&
+                linetarget != p->mo && !linetarget->player && linetarget->type != MT_BARREL) {
+                current_visible = linetarget;
+                current_dist = P_AproxDistance(linetarget->x-p->mo->x, linetarget->y-p->mo->y);
+            }
+            continue;
+        }
 
         if (mo == combat_target) {
             current_visible = mo;
@@ -3165,8 +3221,14 @@ static mobj_t *Bot_Threat(player_t *p)
     }
     if (best) {
         if (best != combat_target) {
+            boolean crowd_shift = (combat_target &&
+                                   P_AproxDistance(best->x-combat_target->x, best->y-combat_target->y) < 160*FRACUNIT);
             combat_target = best;
-            combat_visible_tics = 1;
+            if (crowd_shift) {
+                if (combat_visible_tics < 8) ++combat_visible_tics;
+            } else {
+                combat_visible_tics = 1;
+            }
             combat_health = best->health;
             combat_progress = leveltime;
             combat_strafe_side = ((best->x ^ best->y) & FRACUNIT) ? 1 : -1;
@@ -3550,6 +3612,8 @@ static boolean Bot_ProjectileClearance(player_t *p, angle_t shot, fixed_t radius
     slope = P_AimLineAttack(p->mo, shot, dist > 64*FRACUNIT ? dist : 64*FRACUNIT);
     if (!linetarget && saved_target && dist > 16*FRACUNIT) {
         fixed_t dz = (saved_target->z + saved_target->height/2) - pz;
+        if (dz < 0 && -dz * 100 > dist * 160)
+            return false;
         if (abs(dz) < dist * 2)
             slope = FixedDiv(dz, dist);
         else
@@ -3663,33 +3727,25 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 
     cur_ammo = weaponinfo[p->readyweapon].ammo;
     cur_needed = p->readyweapon == wp_bfg ? 40 : p->readyweapon == wp_supershotgun ? 2 : 1;
-    if (cur_ammo != am_noammo && p->ammo[cur_ammo] < cur_needed)
+    if (cur_ammo != am_noammo && p->ammo[cur_ammo] < cur_needed && p->pendingweapon == wp_nochange)
         weapon_switch_until = 0;
 
     if (p->pendingweapon!=wp_nochange) return;
     if (cur_ammo!=am_noammo && p->ammo[cur_ammo]>=cur_needed) {
-        boolean unsafe = (p->readyweapon==wp_missile && !rocket_clear) ||
-                         (p->readyweapon==wp_plasma && !plasma_clear) ||
-                         (p->readyweapon==wp_bfg && !bfg_clear);
-        boolean ineffective=p->readyweapon==wp_supershotgun && dist>384*FRACUNIT &&
-                            (best != wp_fist && best != wp_chainsaw);
+        boolean self_hazard = (p->readyweapon==wp_missile && !rocket_clear);
+        if (!self_hazard && leveltime < weapon_switch_until) return;
         boolean modest_enemy=enemy && enemy->health<=70 &&
             enemy->type!=MT_CHAINGUY && nearby_attackers<3;
-        if (!unsafe && !ineffective) {
-            if (leveltime<weapon_switch_until) return;
-            /* Finishing a zombie/imp with the gun already raised is faster
-               than lowering it merely because another target is farther away. */
-            if (modest_enemy && (p->readyweapon==wp_pistol ||
-                p->readyweapon==wp_chaingun || (p->readyweapon==wp_plasma && plasma_clear) ||
-                (p->readyweapon==wp_shotgun && dist<640*FRACUNIT) ||
-                (p->readyweapon==wp_supershotgun && dist<320*FRACUNIT))) return;
-        }
+        if (modest_enemy && (p->readyweapon==wp_pistol ||
+            p->readyweapon==wp_chaingun || (p->readyweapon==wp_plasma && plasma_clear) ||
+            (p->readyweapon==wp_shotgun && dist<640*FRACUNIT) ||
+            (p->readyweapon==wp_supershotgun && dist<400*FRACUNIT))) return;
     }
 
     if (best != p->readyweapon && p->pendingweapon == wp_nochange) {
         int slot = best == wp_supershotgun ? wp_shotgun : best;
         cmd->buttons |= BT_CHANGE | (slot << BT_WEAPONSHIFT);
-        weapon_switch_until = leveltime + 3*TICRATE;
+        weapon_switch_until = leveltime + 35;
     }
 }
 
@@ -5104,7 +5160,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         /* When the target is almost overhead, its XY bearing can flip by 90-180
            degrees from a one-unit movement.  Do not let that pathological
            azimuth steal the first-person view; move out from underneath first. */
-        if (stable_shot && !(dz > 40*FRACUNIT && d < 96*FRACUNIT)) {
+        if (stable_shot && !(hismid > mymid + 40*FRACUNIT && d < 96*FRACUNIT)) {
             if (!(map04_crate_route && Bot_HasKey(p,it_redcard)) || prefer_combat)
                 aim = combat_last_aim;
             /* Barrel safety was checked for the current weapon. Keep it;
@@ -5114,15 +5170,13 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 (!Bot_RocketLaneSafe(mo,threat,d) ||
                  !Bot_ProjectileClearance(p, aim, 16*FRACUNIT, d))) {
                 can_fire = false;
-                weapon_switch_until = 0;
+                if (p->pendingweapon == wp_nochange) weapon_switch_until = 0;
             } else if (p->readyweapon==wp_plasma &&
                        !Bot_ProjectileClearance(p, aim, 14*FRACUNIT, d)) {
                 can_fire = false;
-                weapon_switch_until = 0;
             } else if (p->readyweapon==wp_bfg &&
                        !Bot_ProjectileClearance(p, aim, 22*FRACUNIT, d)) {
                 can_fire = false;
-                weapon_switch_until = 0;
             }
             if (can_fire && !Bot_ShotBarrelSafe(p,threat,&barrel_hazard)) {
                 can_fire=false;
@@ -5516,8 +5570,12 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         angle_t shot = mo->angle + (angle_t)((int)cmd->angleturn * 65536);
         ammotype_t ammo=weaponinfo[p->readyweapon].ammo;
         int needed=p->readyweapon==wp_bfg ? 40 : p->readyweapon==wp_supershotgun ? 2 : 1;
+        boolean valid_target;
         P_AimLineAttack(mo, shot, ammo==am_noammo ? MELEERANGE : MISSILERANGE);
-        if (linetarget == threat && (ammo==am_noammo || p->ammo[ammo]>=needed)) {
+        valid_target = (linetarget == threat) ||
+                       (linetarget && (linetarget->flags & MF_SHOOTABLE) &&
+                        linetarget->health > 0 && !linetarget->player && linetarget != p->mo);
+        if (valid_target && (ammo==am_noammo || p->ammo[ammo]>=needed)) {
             boolean proj_ok = true;
             fixed_t threat_dist = threat ? P_AproxDistance(threat->x-mo->x, threat->y-mo->y) : 128*FRACUNIT;
             if (p->readyweapon == wp_plasma)
@@ -5530,8 +5588,6 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
 
             if (proj_ok) {
                 cmd->buttons |= BT_ATTACK;
-            } else {
-                weapon_switch_until = 0;
             }
         }
     }
