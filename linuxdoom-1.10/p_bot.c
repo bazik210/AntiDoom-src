@@ -3689,6 +3689,11 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
         if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2) best = wp_supershotgun;
     }
 
+    /* Chaingunners must be suppressed with chaingun rapid-fire stunlock */
+    if (enemy && enemy->type == MT_CHAINGUY && p->weaponowned[wp_chaingun] &&
+        p->ammo[am_clip] > 0 && dist > 192*FRACUNIT)
+        best = wp_chaingun;
+
     angle_t enemy_ang = enemy ? R_PointToAngle2(p->mo->x, p->mo->y, enemy->x, enemy->y) : p->mo->angle;
     boolean plasma_clear = Bot_ProjectileClearance(p, enemy_ang, 14*FRACUNIT, dist);
     boolean bfg_clear = Bot_ProjectileClearance(p, enemy_ang, 22*FRACUNIT, dist);
@@ -3734,18 +3739,28 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
     if (cur_ammo!=am_noammo && p->ammo[cur_ammo]>=cur_needed) {
         boolean self_hazard = (p->readyweapon==wp_missile && !rocket_clear);
         if (!self_hazard && leveltime < weapon_switch_until) return;
-        boolean modest_enemy=enemy && enemy->health<=70 &&
-            enemy->type!=MT_CHAINGUY && nearby_attackers<3;
-        if (modest_enemy && (p->readyweapon==wp_pistol ||
-            p->readyweapon==wp_chaingun || (p->readyweapon==wp_plasma && plasma_clear) ||
-            (p->readyweapon==wp_shotgun && dist<640*FRACUNIT) ||
-            (p->readyweapon==wp_supershotgun && dist<400*FRACUNIT))) return;
+
+        /* Priority target: Chaingunners must be suppressed with Chaingun */
+        boolean chainguy_threat = (enemy && enemy->type == MT_CHAINGUY && dist > 192*FRACUNIT);
+        if (chainguy_threat && p->readyweapon != wp_chaingun &&
+            p->weaponowned[wp_chaingun] && p->ammo[am_clip] > 0) {
+            /* Allow switch to chaingun to stunlock chaingunner */
+        } else {
+            /* Normal combat: hold raised gun within effective range instead of flapping */
+            if (p->readyweapon == wp_plasma && plasma_clear) return;
+            if (p->readyweapon == wp_supershotgun && dist < 480*FRACUNIT &&
+                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 1)) return;
+            if (p->readyweapon == wp_chaingun && dist > 180*FRACUNIT &&
+                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 1)) return;
+            if (p->readyweapon == wp_shotgun && dist < 640*FRACUNIT &&
+                (!p->weaponowned[wp_supershotgun] || dist > 350*FRACUNIT)) return;
+        }
     }
 
     if (best != p->readyweapon && p->pendingweapon == wp_nochange) {
         int slot = best == wp_supershotgun ? wp_shotgun : best;
         cmd->buttons |= BT_CHANGE | (slot << BT_WEAPONSHIFT);
-        weapon_switch_until = leveltime + 35;
+        weapon_switch_until = leveltime + 45;
     }
 }
 
