@@ -3543,20 +3543,38 @@ static boolean Bot_ProjectileClearance(player_t *p, angle_t shot, fixed_t radius
     fixed_t sin_a = finesine[shot >> ANGLETOFINESHIFT];
     fixed_t pz = p->mo->z + 32 * FRACUNIT;
     fixed_t height = (p->readyweapon == wp_bfg) ? 16*FRACUNIT : 8*FRACUNIT;
+    fixed_t slope;
+    fixed_t check_dist;
+    mobj_t *saved_target = linetarget;
 
-    proj_probe.z = pz;
-    proj_probe.height = height;
+    slope = P_AimLineAttack(p->mo, shot, dist > 64*FRACUNIT ? dist : 64*FRACUNIT);
+    if (!linetarget && saved_target && dist > 16*FRACUNIT) {
+        fixed_t dz = (saved_target->z + saved_target->height/2) - pz;
+        if (abs(dz) < dist * 2)
+            slope = FixedDiv(dz, dist);
+        else
+            slope = dz > 0 ? (100*FRACUNIT/160) : (-100*FRACUNIT/160);
+    }
+    linetarget = saved_target;
 
-    steps = (dist / FRACUNIT) / 16;
+    check_dist = dist > 384*FRACUNIT ? 384*FRACUNIT : (dist < 48*FRACUNIT ? 48*FRACUNIT : dist);
+    steps = (check_dist / FRACUNIT) / 24;
     if (steps < 2) steps = 2;
-    if (steps > 10) steps = 10;
+    if (steps > 16) steps = 16;
 
     for (i = 1; i <= steps; ++i) {
-        fixed_t d = (i == 1) ? 12 * FRACUNIT : (i * 16 * FRACUNIT);
+        fixed_t d = (i * check_dist) / steps;
         fixed_t cx = p->mo->x + FixedMul(d, cos_a);
         fixed_t cy = p->mo->y + FixedMul(d, sin_a);
+        fixed_t cz = pz + FixedMul(d, slope);
+        sector_t *sec = R_PointInSubsector(cx, cy)->sector;
         int xl, xh, yl, yh, bx, by;
 
+        if (cz < sec->floorheight || cz + height > sec->ceilingheight)
+            return false;
+
+        proj_probe.z = cz;
+        proj_probe.height = height;
         proj_probe.box[BOXLEFT] = cx - radius;
         proj_probe.box[BOXRIGHT] = cx + radius;
         proj_probe.box[BOXBOTTOM] = cy - radius;
@@ -3608,10 +3626,10 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
     }
 
     angle_t enemy_ang = enemy ? R_PointToAngle2(p->mo->x, p->mo->y, enemy->x, enemy->y) : p->mo->angle;
-    boolean plasma_clear = Bot_ProjectileClearance(p, enemy_ang, 14*FRACUNIT, 56*FRACUNIT);
-    boolean bfg_clear = Bot_ProjectileClearance(p, enemy_ang, 22*FRACUNIT, 80*FRACUNIT);
+    boolean plasma_clear = Bot_ProjectileClearance(p, enemy_ang, 14*FRACUNIT, dist);
+    boolean bfg_clear = Bot_ProjectileClearance(p, enemy_ang, 22*FRACUNIT, dist);
     boolean rocket_clear = Bot_RocketLaneSafe(p->mo, enemy, dist) &&
-                           Bot_ProjectileClearance(p, enemy_ang, 16*FRACUNIT, 160*FRACUNIT);
+                           Bot_ProjectileClearance(p, enemy_ang, 16*FRACUNIT, dist);
 
     if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && rocket_clear)
         best = wp_missile;
@@ -5094,15 +5112,15 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             if (threat->type != MT_BARREL) Bot_Weapon(cmd, p, d, threat);
             if (p->readyweapon==wp_missile &&
                 (!Bot_RocketLaneSafe(mo,threat,d) ||
-                 !Bot_ProjectileClearance(p, aim, 16*FRACUNIT, 160*FRACUNIT))) {
+                 !Bot_ProjectileClearance(p, aim, 16*FRACUNIT, d))) {
                 can_fire = false;
                 weapon_switch_until = 0;
             } else if (p->readyweapon==wp_plasma &&
-                       !Bot_ProjectileClearance(p, aim, 14*FRACUNIT, 56*FRACUNIT)) {
+                       !Bot_ProjectileClearance(p, aim, 14*FRACUNIT, d)) {
                 can_fire = false;
                 weapon_switch_until = 0;
             } else if (p->readyweapon==wp_bfg &&
-                       !Bot_ProjectileClearance(p, aim, 22*FRACUNIT, 80*FRACUNIT)) {
+                       !Bot_ProjectileClearance(p, aim, 22*FRACUNIT, d)) {
                 can_fire = false;
                 weapon_switch_until = 0;
             }
@@ -5274,6 +5292,20 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             boolean on_lift = (depart_lift_sector >= 0 && mo->subsector->sector - sectors == depart_lift_sector);
             boolean boarding_lift = (lift_commit_line >= 0 && !lift_commit_boarded);
             if (!on_lift && !boarding_lift) stop = true;
+            if (high_ground && !can_fire && ranged_ammo) {
+                angle_t fang = R_PointToAngle2(mo->x, mo->y, threat->x, threat->y);
+                int st;
+                for (st = 96; st >= 24; st -= 16) {
+                    fixed_t fx = mo->x + FixedMul(st * FRACUNIT, finecosine[fang >> ANGLETOFINESHIFT]);
+                    fixed_t fy = mo->y + FixedMul(st * FRACUNIT, finesine[fang >> ANGLETOFINESHIFT]);
+                    if (Bot_WalkStable(mo->x, mo->y, mo->z, fx, fy, mo, true)) {
+                        tx = fx; ty = fy;
+                        stop = false;
+                        combat_moved = true;
+                        break;
+                    }
+                }
+            }
         }
         if (prefer_combat) {
             combat_pause_until = leveltime + TICRATE;
@@ -5487,13 +5519,14 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         P_AimLineAttack(mo, shot, ammo==am_noammo ? MELEERANGE : MISSILERANGE);
         if (linetarget == threat && (ammo==am_noammo || p->ammo[ammo]>=needed)) {
             boolean proj_ok = true;
+            fixed_t threat_dist = threat ? P_AproxDistance(threat->x-mo->x, threat->y-mo->y) : 128*FRACUNIT;
             if (p->readyweapon == wp_plasma)
-                proj_ok = Bot_ProjectileClearance(p, shot, 14*FRACUNIT, 56*FRACUNIT);
+                proj_ok = Bot_ProjectileClearance(p, shot, 14*FRACUNIT, threat_dist);
             else if (p->readyweapon == wp_bfg)
-                proj_ok = Bot_ProjectileClearance(p, shot, 22*FRACUNIT, 80*FRACUNIT);
+                proj_ok = Bot_ProjectileClearance(p, shot, 22*FRACUNIT, threat_dist);
             else if (p->readyweapon == wp_missile)
-                proj_ok = Bot_RocketLaneSafe(mo, threat, P_AproxDistance(threat->x-mo->x, threat->y-mo->y)) &&
-                          Bot_ProjectileClearance(p, shot, 16*FRACUNIT, 160*FRACUNIT);
+                proj_ok = Bot_RocketLaneSafe(mo, threat, threat_dist) &&
+                          Bot_ProjectileClearance(p, shot, 16*FRACUNIT, threat_dist);
 
             if (proj_ok) {
                 cmd->buttons |= BT_ATTACK;
