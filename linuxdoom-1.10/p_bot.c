@@ -3207,8 +3207,9 @@ static mobj_t *Bot_Threat(player_t *p)
             current_visible = NULL;
     }
     if (current_visible) {
-        if (!best || best == current_visible ||
-            !(bestdist < 96*FRACUNIT && current_dist > 192*FRACUNIT)) {
+        boolean same_lvl = (best && abs(best->z-p->mo->z)<=32*FRACUNIT && abs(current_visible->z-p->mo->z)>32*FRACUNIT && bestdist<350*FRACUNIT);
+        boolean close_p = (bestdist<192*FRACUNIT && current_dist>bestdist+64*FRACUNIT);
+        if (!best || best == current_visible || (!same_lvl && !close_p)) {
             best = current_visible;
             bestdist = current_dist;
         }
@@ -3706,7 +3707,8 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 
     if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && rocket_clear)
         best = wp_missile;
-    if (p->weaponowned[wp_plasma] && p->ammo[am_cell]>0 && plasma_clear)
+    boolean has_other = (p->weaponowned[wp_supershotgun] && p->ammo[am_shell]>=4) || (p->weaponowned[wp_chaingun] && p->ammo[am_clip]>=30);
+    if (p->weaponowned[wp_plasma] && p->ammo[am_cell] >= (has_other ? 30 : 1) && plasma_clear)
         best = wp_plasma;
     else if (p->weaponowned[wp_bfg] && p->ammo[am_cell]>=40 && bfg_clear)
         best = wp_bfg;
@@ -3753,9 +3755,9 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
             /* Normal combat: hold raised gun within effective range instead of flapping */
             if (p->readyweapon == wp_plasma && plasma_clear) return;
             if (p->readyweapon == wp_supershotgun && dist < 480*FRACUNIT &&
-                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 1)) return;
+                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 30)) return;
             if (p->readyweapon == wp_chaingun && dist > 180*FRACUNIT &&
-                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 1)) return;
+                (!p->weaponowned[wp_plasma] || !plasma_clear || p->ammo[am_cell] < 30)) return;
             if (p->readyweapon == wp_shotgun && dist < 640*FRACUNIT &&
                 (!p->weaponowned[wp_supershotgun] || dist > 350*FRACUNIT)) return;
         }
@@ -5221,9 +5223,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             tx = path_step < path_len ? Bot_X(path[path_step]) : goal.x;
             ty = path_step < path_len ? Bot_Y(path[path_step]) : goal.y;
             stop = false;
-        } else if (retreat_needed && !combat_route_lock && !high_ground && !lift_riding) {
+        } else if (retreat_needed && !combat_route_lock && !lift_riding) {
             fixed_t retreatx, retreaty;
-            if (Bot_FindHitscanRetreat(mo,threat,ledge_protect,
+            if (Bot_FindHitscanRetreat(mo,threat,ledge_protect || high_ground,
                                        &retreatx,&retreaty)) {
                 /* Keep shooting while moving away. combat_moved prevents the
                    generic combat branch below from replacing this retreat
@@ -5274,7 +5276,7 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
            where this engagement began.  v8 rebuilt a 48-unit side target from
            the NEW player position every tic, which effectively meant "keep
            walking sideways forever" and could carry the bot into another room. */
-        if (prefer_combat && !combat_route_lock && !high_ground && !door_combat_window &&
+        if (prefer_combat && !combat_route_lock && !door_combat_window &&
             !lift_riding && threat->type != MT_BARREL &&
             leveltime >= missile_dodge_pause_until &&
             d < 350*FRACUNIT && d > 96*FRACUNIT && dz < 40*FRACUNIT) {
