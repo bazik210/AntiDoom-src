@@ -57,6 +57,7 @@ static fixed_t last_x, last_y, progress_dist;
 static int use_until, last_keys;
 static int next_key_memory_scan;
 static boolean had_ranged_ammo;
+static boolean rearm_mode = false;
 
 /* Short progression lock:
    prevents explore/loot from stealing control after important actions */
@@ -1460,9 +1461,9 @@ static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
     if (best < 0) return false;
     if (best_dist + priority < goal.score) {
         goal.type = GO_ITEM;
-        goal_item_emergency =
-            (!Bot_HasRangedAmmo(p) && Bot_RearmPickup(p,item)) ||
-            (p->health <= 35 &&
+                goal_item_emergency =
+            ((!Bot_HasRangedAmmo(p) || rearm_mode) && Bot_RearmPickup(p,item)) ||
+            (p->health <= 60 &&
              (item->sprite==SPR_STIM || item->sprite==SPR_MEDI ||
               item->sprite==SPR_SOUL || item->sprite==SPR_MEGA));
 
@@ -1495,6 +1496,18 @@ static boolean Bot_HasRangedAmmo(player_t *p)
     return false;
 }
 
+static boolean Bot_HasCombatReserve(player_t *p)
+{
+    if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 16) return true;
+    if (p->weaponowned[wp_shotgun] && p->ammo[am_shell] >= 12) return true;
+    if (p->weaponowned[wp_chaingun] && p->ammo[am_clip] >= 60) return true;
+    if (p->weaponowned[wp_plasma] && p->ammo[am_cell] >= 40) return true;
+    if (p->weaponowned[wp_bfg] && p->ammo[am_cell] >= 40) return true;
+    if (p->weaponowned[wp_missile] && p->ammo[am_misl] >= 6) return true;
+    if (p->weaponowned[wp_pistol] && p->ammo[am_clip] >= 40) return true;
+    return false;
+}
+
 static boolean Bot_RearmPickup(player_t *p, mobj_t *mo)
 {
     switch (mo->sprite) {
@@ -1512,7 +1525,7 @@ static boolean Bot_RearmPickup(player_t *p, mobj_t *mo)
 
 static int Bot_ItemPriority(player_t *p, mobj_t *mo)
 {
-    if (!Bot_HasRangedAmmo(p) && Bot_RearmPickup(p,mo)) return -40000;
+    if ((!Bot_HasRangedAmmo(p) || rearm_mode) && Bot_RearmPickup(p,mo)) return -40000;
     switch (mo->sprite) {
         case SPR_BKEY: case SPR_BSKU: return Bot_HasKey(p, it_bluecard) ? INF : -2500;
         case SPR_RKEY: case SPR_RSKU: return Bot_HasKey(p, it_redcard)  ? INF : -2500;
@@ -1556,31 +1569,31 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_ARM2: return p->armorpoints < 200 ? -2400 : INF;
 
         /* === РџР°С‚СЂРѕРЅС‹ вЂ” С‚РµРїРµСЂСЊ РїРѕРґР±РёСЂР°РµРј Р·Р°СЂР°РЅРµРµ === */
-        case SPR_CLIP: case SPR_AMMO:
-            if (p->ammo[am_clip] < 20) return -25000;
-            if (p->ammo[am_clip] < 50) return -1800;
-            if (p->ammo[am_clip] < p->maxammo[am_clip]) return -600;
+                case SPR_CLIP: case SPR_AMMO:
+            if (p->ammo[am_clip] < 40) return -25000;
+            if (p->ammo[am_clip] < 100) return -8000;
+            if (p->ammo[am_clip] < p->maxammo[am_clip]) return -3000;
             return INF;
 
         case SPR_SHEL: case SPR_SBOX:
             if (!p->weaponowned[wp_shotgun] && !p->weaponowned[wp_supershotgun]) return INF;
-            if (p->ammo[am_shell] < 8) return -25000;
-            if (p->ammo[am_shell] < 24) return -1800;
-            if (p->ammo[am_shell] < p->maxammo[am_shell]) return -700;
+            if (p->ammo[am_shell] < 16) return -25000;
+            if (p->ammo[am_shell] < 32) return -8000;
+            if (p->ammo[am_shell] < p->maxammo[am_shell]) return -3000;
             return INF;
 
         case SPR_CELL: case SPR_CELP:
             if (!p->weaponowned[wp_plasma] && !p->weaponowned[wp_bfg]) return INF;
-            if (p->ammo[am_cell] < 40) return -25000;
-            if (p->ammo[am_cell] < 100) return -1800;
-            if (p->ammo[am_cell] < p->maxammo[am_cell]) return -600;
+            if (p->ammo[am_cell] < 60) return -25000;
+            if (p->ammo[am_cell] < 150) return -8000;
+            if (p->ammo[am_cell] < p->maxammo[am_cell]) return -3000;
             return INF;
 
         case SPR_ROCK: case SPR_BROK:
             if (!p->weaponowned[wp_missile]) return INF;
-            if (p->ammo[am_misl] < 4) return -25000;
-            if (p->ammo[am_misl] < 10) return -1800;
-            if (p->ammo[am_misl] < p->maxammo[am_misl]) return -500;
+            if (p->ammo[am_misl] < 8) return -25000;
+            if (p->ammo[am_misl] < 20) return -8000;
+            if (p->ammo[am_misl] < p->maxammo[am_misl]) return -3000;
             return INF;
 
         case SPR_BPAK:
@@ -2508,7 +2521,7 @@ static void Bot_Plan(player_t *p)
         if (mo==generic_key && priority!=INF) priority=-45000;
         if (priority!=INF && priority>-10000 && mo!=generic_key &&
             lift_commit_line<0 && !forced_item_active &&
-            P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<192*FRACUNIT &&
+            P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<350*FRACUNIT &&
             abs(mo->z-p->mo->z)<32*FRACUNIT)
             priority-=35000;
         if (map04_crate_route && !Bot_HasKey(p,it_redcard) &&
@@ -2527,8 +2540,8 @@ static void Bot_Plan(player_t *p)
                 forced_seen = true;
                 forced_item_until = leveltime + 2100;
             }
-            boolean nearby_incidental = (P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<192*FRACUNIT &&
-                                         abs(mo->z-p->mo->z)<24*FRACUNIT);
+            boolean nearby_incidental = (P_AproxDistance(mo->x-p->mo->x,mo->y-p->mo->y)<350*FRACUNIT &&
+                                         abs(mo->z-p->mo->z)<32*FRACUNIT);
             if ((leveltime < post_use_local_until || key_progress ||
                  (lift_commit_line >= 0 && leveltime < lift_commit_until)) &&
                 !forced_item_active && !nearby_incidental) {
@@ -2570,6 +2583,8 @@ static void Bot_Plan(player_t *p)
         forced_item_until = 0;
         I_Log("Bot: forced item lock released\n");
     }
+    if (rearm_mode && (Bot_HasCombatReserve(p) || goal.type != GO_ITEM))
+        rearm_mode = false;
 
     /* Explore reachable sectors when no useful interaction/item/exit is known.
        This also crosses unmarked stairs and visits boss arenas. */
@@ -2729,6 +2744,7 @@ void Bot_InitLevel(void)
     /* explore_cooldown initialized above */
     next_key_memory_scan = 0;
     had_ranged_ammo = true;
+    rearm_mode = false;
     key_progress_mask = 0;
     stuck_since = last_progress = 0; last_x = last_y = 0;
     next_ledge_diagnostic = 0;
@@ -3434,10 +3450,9 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
 
     if (dist > ssg_dist) {
         /* Long-range accuracy: Chaingun or regular Shotgun snipe at distance */
+        if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2) best = wp_supershotgun;
         if (p->weaponowned[wp_shotgun] && p->ammo[am_shell] > 0) best = wp_shotgun;
         if (p->weaponowned[wp_chaingun] && p->ammo[am_clip] > 0) best = wp_chaingun;
-        if (best == wp_pistol && p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2 &&
-            dist < 320*FRACUNIT) best = wp_supershotgun;
     } else {
         /* Close / medium range: Super Shotgun dominates */
         if (p->weaponowned[wp_chaingun] && p->ammo[am_clip] > 0) best = wp_chaingun;
@@ -3465,12 +3480,20 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
     /* If clearance rejected projectiles, but we have NO hitscan ammo:
        Never fall back to bare fists or chainsaw! Keep the heavy weapon raised! */
     if (best == wp_fist || best == wp_chainsaw) {
-        if (p->weaponowned[wp_plasma] && p->ammo[am_cell] > 0)
+        if (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 2)
+            best = wp_supershotgun;
+        else if (p->weaponowned[wp_shotgun] && p->ammo[am_shell] > 0)
+            best = wp_shotgun;
+        else if (p->weaponowned[wp_chaingun] && p->ammo[am_clip] > 0)
+            best = wp_chaingun;
+        else if (p->weaponowned[wp_plasma] && p->ammo[am_cell] > 0)
             best = wp_plasma;
         else if (p->weaponowned[wp_bfg] && p->ammo[am_cell] >= 40)
             best = wp_bfg;
         else if (p->weaponowned[wp_missile] && p->ammo[am_misl] > 0 && dist > 192*FRACUNIT)
             best = wp_missile;
+        else if (p->ammo[am_clip] > 0)
+            best = wp_pistol;
     }
 
     cur_ammo = weaponinfo[p->readyweapon].ammo;
@@ -3483,7 +3506,8 @@ static void Bot_Weapon(ticcmd_t *cmd, player_t *p, fixed_t dist, mobj_t *enemy)
         boolean unsafe = (p->readyweapon==wp_missile && !rocket_clear) ||
                          (p->readyweapon==wp_plasma && !plasma_clear) ||
                          (p->readyweapon==wp_bfg && !bfg_clear);
-        boolean ineffective=p->readyweapon==wp_supershotgun && dist>384*FRACUNIT;
+        boolean ineffective=p->readyweapon==wp_supershotgun && dist>384*FRACUNIT &&
+                            (best != wp_fist && best != wp_chainsaw);
         boolean modest_enemy=enemy && enemy->health<=70 &&
             enemy->type!=MT_CHAINGUY && nearby_attackers<3;
         if (!unsafe && !ineffective) {
@@ -3937,7 +3961,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
     if (!count) return;
     if (run_state && Bot_RunCommand(cmd,p)) return;
 
-    if (had_ranged_ammo && !Bot_HasRangedAmmo(p)) { next_plan=0; combat_pause_until=0; }
+    if (had_ranged_ammo && !Bot_HasRangedAmmo(p)) { rearm_mode=true; next_plan=0; combat_pause_until=0; }
+    if (rearm_mode && Bot_HasCombatReserve(p)) rearm_mode=false;
     had_ranged_ammo=Bot_HasRangedAmmo(p);
     {
         ammotype_t cur_ammo = weaponinfo[p->readyweapon].ammo;
@@ -4801,8 +4826,11 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean stable_shot = combat_visible_tics >= 3 || urgent;
         fixed_t item_dist = (goal.type == GO_ITEM) ?
             P_AproxDistance(goal.x - mo->x, goal.y - mo->y) : INF;
-        boolean supply_run = goal.type==GO_ITEM && goal_item_emergency &&
-                             item_dist < 192*FRACUNIT;
+        boolean nearby_item = (goal.type == GO_ITEM && item_dist < 350*FRACUNIT);
+        boolean low_ammo = (p->ammo[am_shell] < 24 || p->ammo[am_clip] < 60);
+        boolean supply_run = goal.type==GO_ITEM &&
+                             (goal_item_emergency || !ranged_ammo || rearm_mode ||
+                              nearby_item || low_ammo || p->health <= 70 || goal.score < -20000);
         boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
