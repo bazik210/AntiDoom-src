@@ -1509,7 +1509,8 @@ static boolean Bot_ItemCandidate(player_t *p, mobj_t *item, int priority)
         goal.type = GO_ITEM;
                 goal_item_emergency =
             ((!Bot_HasRangedAmmo(p) || rearm_mode) && Bot_RearmPickup(p,item)) ||
-            (p->health <= 60 &&
+            (item->sprite==SPR_PINV && !p->powers[pw_invulnerability]) ||
+            (p->health < 85 &&
              (item->sprite==SPR_STIM || item->sprite==SPR_MEDI ||
               item->sprite==SPR_SOUL || item->sprite==SPR_MEGA));
 
@@ -1588,9 +1589,9 @@ static int Bot_ItemPriority(player_t *p, mobj_t *mo)
         case SPR_BON2: return p->armorpoints < 200 ? -200 : INF;
         case SPR_STIM: case SPR_MEDI:
             if (p->health >= 100) return INF;
-            if (p->health < 40) return -28000;
-            if (p->health < 75) return -4000;
-            return -1800;
+            if (p->health < 50) return -32000;
+            if (p->health < 80) return -18000;
+            return -7000;
 
         case SPR_SOUL: case SPR_MEGA:
             if (p->health < 50) return -40000;
@@ -2639,9 +2640,11 @@ static void Bot_Plan(player_t *p)
             else priority=-45000;
         }
         if (priority != INF && (leveltime < evacuate_until || leveltime < unviable_danger_until)) {
+            boolean exempt = (mo->sprite == SPR_PINV && !p->powers[pw_invulnerability]) ||
+                             ((mo->sprite == SPR_MEGA || mo->sprite == SPR_SOUL) && Bot_HasCombatReserve(p));
             int isec = (int)(mo->subsector->sector - sectors);
-            if (leveltime < evacuate_until || isec == unviable_danger_sector || isec == unviable_danger_door_sector ||
-                P_AproxDistance(mo->x-unviable_danger_x, mo->y-unviable_danger_y) < 900*FRACUNIT) {
+            if (!exempt && (leveltime < evacuate_until || isec == unviable_danger_sector || isec == unviable_danger_door_sector ||
+                P_AproxDistance(mo->x-unviable_danger_x, mo->y-unviable_danger_y) < 900*FRACUNIT)) {
                 priority = INF;
             }
         }
@@ -3102,6 +3105,7 @@ static int Bot_TotalAvailableDamage(player_t *p)
 static boolean Bot_CombatViable(player_t *p, mobj_t *threat, fixed_t dist)
 {
     if (!threat || threat->health <= 0 || threat->type == MT_BARREL) return true;
+    if (p->powers[pw_invulnerability]) return true;
     boolean is_heavy = (threat->type == MT_KNIGHT || threat->type == MT_BRUISER ||
                         threat->type == MT_FATSO || threat->type == MT_BABY ||
                         threat->type == MT_UNDEAD || threat->type == MT_HEAD ||
@@ -4668,7 +4672,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
                 Bot_ClearDoorCommit();
                 door_combat_window = false;
             }
-            if (goal.type != GO_NONE && (goal.type == GO_ITEM || (goal.type == GO_EXPLORE && P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 700*FRACUNIT))) {
+            boolean vital_goal = (goal.type == GO_ITEM && goal.score <= -30000);
+            if (goal.type != GO_NONE && !vital_goal && (goal.type == GO_ITEM || (goal.type == GO_EXPLORE && P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 700*FRACUNIT))) {
                 goal.type = GO_NONE;
                 next_plan = 0;
             }
@@ -5135,7 +5140,9 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean low_ammo = (p->ammo[am_shell] < 24 || p->ammo[am_clip] < 60);
         boolean supply_run = goal.type==GO_ITEM &&
                              (goal_item_emergency || !ranged_ammo || rearm_mode ||
-                              nearby_item || low_ammo || p->health <= 70 || goal.score < -20000);
+                              nearby_item || low_ammo || p->health < 85 ||
+                              (p->powers[pw_invulnerability] && p->health < 100) ||
+                              goal.score < -20000);
                 boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
@@ -5202,9 +5209,10 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             can_fire = false;
         }
 
-        boolean retreat_needed = (!combat_viable && threat) ||
-                                 ((threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT);
-        if (!combat_viable && threat && goal.type == GO_ITEM &&
+        boolean retreat_needed = !p->powers[pw_invulnerability] &&
+                                 ((!combat_viable && threat) ||
+                                  ((threat->type == MT_CHAINGUY || urgent) && d < 420*FRACUNIT));
+        if (!combat_viable && threat && goal.type == GO_ITEM && goal.score > -30000 &&
             P_AproxDistance(goal.x-threat->x, goal.y-threat->y) < 750*FRACUNIT) {
             goal.type = GO_NONE;
             next_plan = 0;
