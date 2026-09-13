@@ -2930,6 +2930,50 @@ static boolean Bot_ShotBarrelSafe(player_t *p, mobj_t *target,
     return safe;
 }
 
+static int Bot_TotalAvailableDamage(player_t *p)
+{
+    int dmg = 0;
+    if (p->weaponowned[wp_pistol] || p->weaponowned[wp_chaingun])
+        dmg += p->ammo[am_clip] * 10;
+    if (p->weaponowned[wp_supershotgun])
+        dmg += (p->ammo[am_shell] / 2) * 150;
+    else if (p->weaponowned[wp_shotgun])
+        dmg += p->ammo[am_shell] * 70;
+    if (p->weaponowned[wp_missile])
+        dmg += p->ammo[am_misl] * 250;
+    if (p->weaponowned[wp_plasma])
+        dmg += p->ammo[am_cell] * 25;
+    else if (p->weaponowned[wp_bfg])
+        dmg += (p->ammo[am_cell] / 40) * 1500;
+    return dmg;
+}
+
+static boolean Bot_CombatViable(player_t *p, mobj_t *threat, fixed_t dist)
+{
+    if (!threat || threat->health <= 0 || threat->type == MT_BARREL) return true;
+    boolean is_heavy = (threat->type == MT_KNIGHT || threat->type == MT_BRUISER ||
+                        threat->type == MT_FATSO || threat->type == MT_BABY ||
+                        threat->type == MT_UNDEAD || threat->type == MT_HEAD ||
+                        threat->type == MT_PAIN || threat->type == MT_CYBORG ||
+                        threat->type == MT_SPIDER || threat->type == MT_VILE ||
+                        threat->health > 250);
+    boolean has_heavy_weapon = (p->weaponowned[wp_supershotgun] && p->ammo[am_shell] >= 4) ||
+                               (p->weaponowned[wp_shotgun] && p->ammo[am_shell] >= 8) ||
+                               (p->weaponowned[wp_chaingun] && p->ammo[am_clip] >= 40) ||
+                               (p->weaponowned[wp_plasma] && p->ammo[am_cell] >= 30) ||
+                               (p->weaponowned[wp_bfg] && p->ammo[am_cell] >= 40) ||
+                               (p->weaponowned[wp_missile] && p->ammo[am_misl] >= 3);
+    int total_dmg = Bot_TotalAvailableDamage(p);
+
+    if (is_heavy) {
+        if (!has_heavy_weapon) return false;
+        if (total_dmg < threat->health) return false;
+    }
+    if (nearby_attackers >= 2 && !has_heavy_weapon && total_dmg < 400)
+        return false;
+    return true;
+}
+
 static mobj_t *Bot_Threat(player_t *p)
 {
     thinker_t *th;
@@ -4831,17 +4875,18 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
         boolean supply_run = goal.type==GO_ITEM &&
                              (goal_item_emergency || !ranged_ammo || rearm_mode ||
                               nearby_item || low_ammo || p->health <= 70 || goal.score < -20000);
-        boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
+                boolean high_ground = mo->z >= threat->z + 32*FRACUNIT;
         boolean route_drop = depart_lift_sector >= 0 && goal.type != GO_NONE &&
             R_PointInSubsector(goal.x,goal.y)->sector->floorheight < mo->z-24*FRACUNIT;
+        boolean combat_viable = Bot_CombatViable(p, threat, d);
         /* Precision routes forbid strafing, not braking to defend ourselves. */
-        prefer_combat = stable_shot && ranged_ammo && d < (urgent ? 800 : 640)*FRACUNIT &&
+        prefer_combat = stable_shot && ranged_ammo && combat_viable && d < (urgent ? 800 : 640)*FRACUNIT &&
             (!map04_crate_route || urgent) &&
             !(route_drop && high_ground && !urgent) && !supply_run;
         can_fire = d < 800*FRACUNIT;
         /* While approaching a timed platform, combat may still aim and fire,
            but it must not replace the route with an endless dodge/strafe. */
-        if (lift_commit_line >= 0 && !lift_commit_boarded && !urgent)
+        if (lift_commit_line >= 0 && !lift_commit_boarded)
             prefer_combat = false;
 
         /* When the target is almost overhead, its XY bearing can flip by 90-180
@@ -5023,7 +5068,8 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
             }
         } else if (prefer_combat && !combat_moved) {
             boolean on_lift = (depart_lift_sector >= 0 && mo->subsector->sector - sectors == depart_lift_sector);
-            if (!on_lift) stop = true;
+            boolean boarding_lift = (lift_commit_line >= 0 && !lift_commit_boarded);
+            if (!on_lift && !boarding_lift) stop = true;
         }
         if (prefer_combat) {
             combat_pause_until = leveltime + TICRATE;
@@ -5062,7 +5108,6 @@ void Bot_BuildTiccmd(ticcmd_t *cmd, player_t *p)
          P_AproxDistance(threat->x-mo->x,threat->y-mo->y) < MELEERANGE)) &&
         !ready_to_run && !interaction_lock &&
         !door_waiting && !lift_riding &&
-        !(lift_commit_line >= 0 && !lift_commit_boarded) &&
         leveltime >= exit_commit_until) {
         fixed_t dodgex, dodgey;
         if (Bot_ProjectileDodge(mo,stop ? mo->x : tx,stop ? mo->y : ty,&dodgex,&dodgey)) {
